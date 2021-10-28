@@ -22,6 +22,9 @@ use std::{env, error::Error, path::PathBuf, sync::Arc};
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 
+#[cfg(feature = "hdfs")]
+pub mod hdfs;
+
 /// Compares formatted output of a record batch with an expected
 /// vector of strings, with the result of pretty formatting record
 /// batches. This is a macro so errors appear on the correct line
