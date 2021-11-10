@@ -772,6 +772,7 @@ message Action {
   oneof ActionType {
     // Fetch a partition from an executor
     FetchPartition fetch_partition = 3;
+    PushPartition push_partition = 99;
   }
 
   // configuration settings
@@ -794,6 +795,12 @@ message FetchPartition {
   uint32 stage_id = 2;
   uint32 partition_id = 3;
   string path = 4;
+}
+
+message PushPartition {
+  string job_id = 1;
+  uint32 stage_id = 2;
+  uint32 partition_id = 3;
 }
 
 // Mapping from partition id to executor id

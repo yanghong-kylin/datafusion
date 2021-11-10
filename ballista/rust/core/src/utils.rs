@@ -111,6 +111,50 @@ pub async fn write_stream_to_disk(
     ))
 }
 
+/// Stream data to executor in Arrow IPC format
+pub async fn write_stream_to_host(
+    stream: &mut Pin<Box<dyn RecordBatchStream + Send + Sync>>,
+    path: &str,
+    disk_write_metric: &metrics::Time,
+) -> Result<PartitionStats> {
+    let file = File::create(&path).map_err(|e| {
+        BallistaError::General(format!(
+            "Failed to create partition file at {}: {:?}",
+            path, e
+        ))
+    })?;
+
+    let mut num_rows = 0;
+    let mut num_batches = 0;
+    let mut num_bytes = 0;
+    let mut writer = FileWriter::try_new(file, stream.schema().as_ref())?;
+
+    while let Some(result) = stream.next().await {
+        let batch = result?;
+
+        let batch_size_bytes: usize = batch
+            .columns()
+            .iter()
+            .map(|array| array.get_array_memory_size())
+            .sum();
+        num_batches += 1;
+        num_rows += batch.num_rows();
+        num_bytes += batch_size_bytes;
+
+        let timer = disk_write_metric.timer();
+        writer.write(&batch)?;
+        timer.done();
+    }
+    let timer = disk_write_metric.timer();
+    writer.finish()?;
+    timer.done();
+    Ok(PartitionStats::new(
+        Some(num_rows as u64),
+        Some(num_batches),
+        Some(num_bytes as u64),
+    ))
+}
+
 pub async fn collect_stream(
     stream: &mut Pin<Box<dyn RecordBatchStream + Send + Sync>>,
 ) -> Result<Vec<RecordBatch>> {

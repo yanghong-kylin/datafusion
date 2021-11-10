@@ -381,7 +381,7 @@ impl TryInto<Arc<dyn ExecutionPlan>> for &protobuf::PhysicalPlanNode {
                     shuffle_writer.output_partitioning.as_ref(),
                 )?;
 
-                Ok(Arc::new(ShuffleWriterExec::try_new(
+                Ok(Arc::new(ShuffleWriterExec::try_new_pull_shuffle(
                     shuffle_writer.job_id.clone(),
                     shuffle_writer.stage_id as usize,
                     input,

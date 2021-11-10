@@ -33,9 +33,10 @@ use ballista_core::serde::protobuf::{
 };
 use ballista_core::serde::scheduler::PartitionStats;
 use ballista_core::{error::BallistaError, serde::scheduler::ExecutorMeta};
-use ballista_core::{error::Result, execution_plans::UnresolvedShuffleExec};
+use ballista_core::{error::Result, execution_plans::UnresolvedShuffleExec, execution_plans::ShuffleWriterExec};
 
 use super::planner::remove_unresolved_shuffles;
+use super::planner::update_shuffle_locs;
 
 #[cfg(feature = "etcd")]
 mod etcd;
@@ -280,6 +281,7 @@ impl SchedulerState {
         &self,
         executor_id: &str,
     ) -> Result<Option<(TaskStatus, Arc<dyn ExecutionPlan>)>> {
+        // TODO: sort all the task by the priority of stages
         let tasks = self.get_all_tasks().await?;
         // TODO: Make the duration a configurable parameter
         let executors = self
@@ -385,6 +387,84 @@ impl SchedulerState {
                     remove_unresolved_shuffles(plan.as_ref(), &partition_locations)?;
 
                 // If we get here, there are no more unresolved shuffled and the task can be run
+                let mut status = status.clone();
+                status.status = Some(task_status::Status::Running(RunningTask {
+                    executor_id: executor_id.to_owned(),
+                }));
+                self.save_task_status(&status).await?;
+                return Ok(Some((status, plan)));
+            }
+        }
+        Ok(None)
+    }
+
+    pub async fn assign_next_schedulable_task2(
+        &self,
+        executor_id: &str,
+    ) -> Result<Option<(TaskStatus, Arc<dyn ExecutionPlan>)>> {
+        // TODO: sort all the task by the priority of stages
+        let tasks = self.get_all_tasks().await?;
+        // TODO: Make the duration a configurable parameter
+        let executors = self
+            .get_alive_executors_metadata(Duration::from_secs(60))
+            .await?;
+        'tasks: for (_key, status) in tasks.iter() {
+            if status.status.is_none() {
+                let partition = status.partition_id.as_ref().unwrap();
+                let plan = self
+                    .get_stage_plan(&partition.job_id, partition.stage_id as usize)
+                    .await?;
+
+                let mut temp_loc = Vec::new();
+
+                // Let's try to resolve the push shuffle writer we find
+                let push_shuffle = find_push_shuffle(&plan);
+                if let Some(push_shuffle) = push_shuffle {
+                    for shuffle_output_partition_id in
+                    0..push_shuffle.output_partitioning().partition_count()
+                    {
+                        // Find out the shuffle reader task
+                        let referenced_task = tasks
+                            .get(&get_task_status_key(
+                                &self.namespace,
+                                &partition.job_id,
+                                push_shuffle.stage_id(),
+                                shuffle_output_partition_id,
+                            ))
+                            .unwrap();
+                        let task_is_dead = self
+                            .reschedule_dead_task(referenced_task, &executors)
+                            .await?;
+                        if task_is_dead {
+                            continue 'tasks;
+                        } else if let Some(task_status::Status::Running(RunningTask { executor_id })) = &referenced_task.status
+                        {
+                            info!("Reduce task for push based shuffle partition {} is running and scheduled to executor :{}",
+                                shuffle_output_partition_id,
+                                executor_id
+                            );
+
+                            let executor_meta = executors
+                                .iter()
+                                .find(|exec| exec.id == *executor_id)
+                                .unwrap()
+                                .clone();
+
+                            temp_loc.push((shuffle_output_partition_id, executor_meta.host, executor_meta.port));
+                        } else {
+                            debug!(
+                                "Stage {} output partition {} has not scheduled yet",
+                                push_shuffle.stage_id(), shuffle_output_partition_id,
+                            );
+                            continue 'tasks;
+                        }
+                    }
+                }
+
+                let plan =
+                    update_shuffle_locs(plan, temp_loc)?;
+
+                // If we get here, there is no push shuffle writer and the task can be run
                 let mut status = status.clone();
                 status.status = Some(task_status::Status::Running(RunningTask {
                     executor_id: executor_id.to_owned(),
@@ -572,6 +652,22 @@ fn find_unresolved_shuffles(
             .into_iter()
             .flatten()
             .collect())
+    }
+}
+
+/// Return the the push shuffles in the execution plan, shuffle writer should be the root node
+fn find_push_shuffle(
+    plan: &Arc<dyn ExecutionPlan>,
+) -> Option<ShuffleWriterExec> {
+    if let Some(shuffle_writer) =
+    plan.as_any().downcast_ref::<ShuffleWriterExec>() {
+        if shuffle_writer.is_push_shuffle() {
+            Some(shuffle_writer.clone())
+        } else {
+            None
+        }
+    } else {
+        None
     }
 }
 

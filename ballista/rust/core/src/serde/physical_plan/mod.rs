@@ -192,7 +192,7 @@ mod roundtrip_tests {
         let field_b = Field::new("b", DataType::Int64, false);
         let schema = Arc::new(Schema::new(vec![field_a, field_b]));
 
-        roundtrip_test(Arc::new(ShuffleWriterExec::try_new(
+        roundtrip_test(Arc::new(ShuffleWriterExec::try_new_pull_shuffle(
             "job123".to_string(),
             123,
             Arc::new(EmptyExec::new(false, schema)),

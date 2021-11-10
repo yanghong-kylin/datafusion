@@ -112,6 +112,7 @@ impl FlightService for BallistaFlightService {
                     Box::pin(ReceiverStream::new(rx)) as Self::DoGetStream
                 ))
             }
+            _ =>  Err(Status::unimplemented("unimplemented action"))
         }
     }
 

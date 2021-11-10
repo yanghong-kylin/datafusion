@@ -92,6 +92,23 @@ impl BallistaClient {
         self.execute_action(&action).await
     }
 
+    /// Push a partition to an executor
+    pub async fn push_partition(
+        &mut self,
+        job_id: String,
+        stage_id: usize,
+        partition_id: usize,
+        input: SendableRecordBatchStream,
+    ) -> Result<()> {
+        let action = Action::PushPartition {
+            job_id: job_id.to_string(),
+            stage_id,
+            partition_id,
+        };
+        self.execute_action(&action).await;
+        Ok(())
+    }
+
     /// Execute an action and retrieve the results
     pub async fn execute_action(
         &mut self,

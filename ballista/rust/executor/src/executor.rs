@@ -17,19 +17,28 @@
 
 //! Ballista executor logic
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
+use arrow::error::Result as ArrowResult;
 use ballista_core::error::BallistaError;
+use ballista_core::execution_plans::ShuffleStreamReaderExec;
 use ballista_core::execution_plans::ShuffleWriterExec;
 use ballista_core::serde::protobuf;
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::display::DisplayableExecutionPlan;
 use datafusion::physical_plan::{ExecutionPlan, Partitioning};
+use hashbrown::HashMap;
+use tokio::sync::mpsc::Sender;
 
 /// Ballista executor
 pub struct Executor {
     /// Directory for storing partial results
     work_dir: String,
+
+    /// Channels for sending partial shuffle partitions to stream shuffle reader.
+    /// Key is the jobId + stageId.
+    channels: RwLock<HashMap<(String, usize), Vec<Sender<ArrowResult<RecordBatch>>>>>,
 }
 
 impl Executor {
@@ -37,6 +46,7 @@ impl Executor {
     pub fn new(work_dir: &str) -> Self {
         Self {
             work_dir: work_dir.to_owned(),
+            channels: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -54,16 +64,38 @@ impl Executor {
         _shuffle_output_partitioning: Option<Partitioning>,
     ) -> Result<Vec<protobuf::ShuffleWritePartition>, BallistaError> {
         let exec = if let Some(shuffle_writer) =
-            plan.as_any().downcast_ref::<ShuffleWriterExec>()
+        plan.as_any().downcast_ref::<ShuffleWriterExec>()
         {
+            // find all the stream shuffle readers and bind them to the context
+            let stream_shuffle_readers = find_stream_shuffle_readers(plan.clone())?;
+            for shuffle_reader in stream_shuffle_readers {
+                let _jobId = shuffle_reader.job_id.clone();
+                let _stageId = shuffle_reader.stage_id;
+                {
+                    let mut _map = self.channels.write().unwrap();
+                    let _senders = _map.entry((_jobId, _stageId)).or_insert(Vec::new());
+                    _senders.push(shuffle_reader.create_record_batch_channel());
+                }
+            }
+
             // recreate the shuffle writer with the correct working directory
-            ShuffleWriterExec::try_new(
-                job_id.clone(),
-                stage_id,
-                plan.children()[0].clone(),
-                self.work_dir.clone(),
-                shuffle_writer.shuffle_output_partitioning().cloned(),
-            )
+            if !shuffle_writer.is_push_shuffle() {
+                ShuffleWriterExec::try_new_pull_shuffle(
+                    job_id.clone(),
+                    stage_id,
+                    plan.children()[0].clone(),
+                    self.work_dir.clone(),
+                    shuffle_writer.shuffle_output_partitioning().cloned(),
+                )
+            } else {
+                ShuffleWriterExec::try_new(
+                    job_id.clone(),
+                    stage_id,
+                    plan.children()[0].clone(),
+                    shuffle_writer.output_loc.clone(),
+                    shuffle_writer.shuffle_output_partitioning().cloned(),
+                )
+            }
         } else {
             Err(DataFusionError::Internal(
                 "Plan passed to execute_shuffle_write is not a ShuffleWriterExec"
@@ -88,5 +120,25 @@ impl Executor {
 
     pub fn work_dir(&self) -> &str {
         &self.work_dir
+    }
+}
+
+/// Returns the the streaming shuffle readers in the execution plan
+pub fn find_stream_shuffle_readers(
+    plan: Arc<dyn ExecutionPlan>,
+) -> Result<Vec<ShuffleStreamReaderExec>, BallistaError> {
+    if let Some(shuffle_reader) = plan.as_any().downcast_ref::<ShuffleStreamReaderExec>()
+    {
+        Ok(vec![shuffle_reader.clone()])
+    } else {
+        let readers = plan
+            .children()
+            .into_iter()
+            .map(|child| find_stream_shuffle_readers(child))
+            .collect::<Result<Vec<_>, BallistaError>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        Ok(readers)
     }
 }
