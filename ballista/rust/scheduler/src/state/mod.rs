@@ -450,7 +450,7 @@ impl SchedulerState {
                                 .unwrap()
                                 .clone();
 
-                            temp_loc.push((shuffle_output_partition_id, executor_meta.host, executor_meta.port));
+                            temp_loc.push((executor_meta));
                         } else {
                             debug!(
                                 "Stage {} output partition {} has not scheduled yet",

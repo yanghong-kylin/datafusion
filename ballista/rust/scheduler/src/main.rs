@@ -35,7 +35,9 @@ use ballista_scheduler::api::{get_routes, EitherBody, Error};
 use ballista_scheduler::state::EtcdClient;
 #[cfg(feature = "sled")]
 use ballista_scheduler::state::StandaloneClient;
-use ballista_scheduler::{state::ConfigBackendClient, ConfigBackend, SchedulerServer, SchedulerPolicy};
+use ballista_scheduler::{
+    state::ConfigBackendClient, ConfigBackend, SchedulerPolicy, SchedulerServer,
+};
 
 use log::info;
 

@@ -477,6 +477,7 @@ message PhysicalPlanNode {
     ShuffleWriterExecNode shuffle_writer = 18;
     CrossJoinExecNode cross_join = 19;
     AvroScanExecNode avro_scan = 20;
+    ShuffleStreamReaderExecNode shuffle_stream_reader = 99;
   }
 }
 
@@ -708,6 +709,14 @@ message ShuffleWriterExecNode {
   uint32 stage_id = 2;
   PhysicalPlanNode input = 3;
   PhysicalHashRepartition output_partitioning = 4;
+  repeated ExecutorMetadata execs = 5;
+}
+
+message ShuffleStreamReaderExecNode {
+  string job_id = 1;
+  uint32 stage_id = 2;
+  uint64 partition_count = 3;
+  Schema schema = 4;
 }
 
 message ShuffleReaderExecNode {

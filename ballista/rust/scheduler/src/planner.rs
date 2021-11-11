@@ -23,8 +23,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ballista_core::error::{BallistaError, Result};
+use ballista_core::serde::scheduler::ExecutorMeta;
 use ballista_core::{
-    execution_plans::{ShuffleReaderExec, ShuffleWriterExec, ShuffleStreamReaderExec, UnresolvedShuffleExec},
+    execution_plans::{
+        ShuffleReaderExec, ShuffleStreamReaderExec, ShuffleWriterExec,
+        UnresolvedShuffleExec,
+    },
     serde::scheduler::PartitionLocation,
 };
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
@@ -129,10 +133,7 @@ impl DistributedPlanner {
                         1,
                     ));
                     stages.push(shuffle_writer);
-                    Ok((
-                        coalesce.with_new_children(vec![shuffle_reader])?,
-                        stages,
-                    ))
+                    Ok((coalesce.with_new_children(vec![shuffle_reader])?, stages))
                 } else {
                     let unresolved_shuffle = Arc::new(UnresolvedShuffleExec::new(
                         shuffle_writer.stage_id(),
@@ -180,22 +181,24 @@ impl DistributedPlanner {
                                 part,
                             ));
                             stages.push(shuffle_writer);
-                            Ok((
-                                repart.with_new_children(vec![shuffle_reader])?,
-                                stages,
-                            ))
+                            Ok((repart.with_new_children(vec![shuffle_reader])?, stages))
                         } else {
-                            let unresolved_shuffle = Arc::new(UnresolvedShuffleExec::new(
-                                shuffle_writer.stage_id(),
-                                shuffle_writer.schema(),
-                                shuffle_writer.output_partitioning().partition_count(),
-                                shuffle_writer
-                                    .shuffle_output_partitioning()
-                                    .map(|p| p.partition_count())
-                                    .unwrap_or_else(|| {
-                                        shuffle_writer.output_partitioning().partition_count()
-                                    }),
-                            ));
+                            let unresolved_shuffle =
+                                Arc::new(UnresolvedShuffleExec::new(
+                                    shuffle_writer.stage_id(),
+                                    shuffle_writer.schema(),
+                                    shuffle_writer
+                                        .output_partitioning()
+                                        .partition_count(),
+                                    shuffle_writer
+                                        .shuffle_output_partitioning()
+                                        .map(|p| p.partition_count())
+                                        .unwrap_or_else(|| {
+                                            shuffle_writer
+                                                .output_partitioning()
+                                                .partition_count()
+                                        }),
+                                ));
                             stages.push(shuffle_writer);
                             Ok((unresolved_shuffle, stages))
                         }
@@ -281,11 +284,14 @@ pub fn remove_unresolved_shuffles(
 
 pub fn update_shuffle_locs(
     stage: Arc<dyn ExecutionPlan>,
-    output_locs: Vec<(usize, String, u16)>) -> Result<Arc<dyn ExecutionPlan>> {
-    if let Some(shuffle_writer) =
-    stage.as_any().downcast_ref::<ShuffleWriterExec>() {
+    output_locs: Vec<ExecutorMeta>,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    if let Some(shuffle_writer) = stage.as_any().downcast_ref::<ShuffleWriterExec>() {
         if shuffle_writer.is_push_shuffle() {
-            assert_eq!(output_locs.len(), shuffle_writer.output_partitioning().partition_count());
+            assert_eq!(
+                output_locs.len(),
+                shuffle_writer.output_partitioning().partition_count()
+            );
             let new_shuffle_writer = Arc::new(ShuffleWriterExec::try_new_push_shuffle(
                 shuffle_writer.job_id().to_string(),
                 shuffle_writer.stage_id(),

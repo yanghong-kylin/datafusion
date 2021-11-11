@@ -33,7 +33,7 @@ use crate::memory_stream::MemoryStream;
 use crate::utils;
 
 use crate::serde::protobuf::ShuffleWritePartition;
-use crate::serde::scheduler::{PartitionLocation, PartitionStats};
+use crate::serde::scheduler::{ExecutorMeta, PartitionLocation, PartitionStats};
 use async_trait::async_trait;
 use datafusion::arrow::array::{
     Array, ArrayBuilder, ArrayRef, StringBuilder, StructBuilder, UInt32Builder,
@@ -82,7 +82,7 @@ pub struct ShuffleWriterExec {
 #[derive(Debug, Clone)]
 pub enum OutputLocation {
     LocalDir(String),
-    Executors(Vec<(usize, String, u16)>)
+    Executors(Vec<ExecutorMeta>),
 }
 
 #[derive(Debug, Clone)]
@@ -151,7 +151,7 @@ impl ShuffleWriterExec {
         job_id: String,
         stage_id: usize,
         plan: Arc<dyn ExecutionPlan>,
-        execs: Vec<(usize, String, u16)>,
+        execs: Vec<ExecutorMeta>,
         shuffle_output_partitioning: Option<Partitioning>,
     ) -> Result<Self> {
         Ok(Self {
@@ -183,7 +183,7 @@ impl ShuffleWriterExec {
     pub fn is_push_shuffle(&self) -> bool {
         match self.output_loc {
             OutputLocation::LocalDir(_) => false,
-            OutputLocation::Executors(_) => true
+            OutputLocation::Executors(_) => true,
         }
     }
 
@@ -201,7 +201,8 @@ impl ShuffleWriterExec {
                 path.push(&self.job_id);
                 path.push(&format!("{}", self.stage_id));
 
-                let write_metrics = ShuffleWriteMetrics::new(input_partition, &self.metrics);
+                let write_metrics =
+                    ShuffleWriteMetrics::new(input_partition, &self.metrics);
                 match &self.shuffle_output_partitioning {
                     None => {
                         let timer = write_metrics.write_time.timer();
@@ -217,8 +218,8 @@ impl ShuffleWriterExec {
                             path,
                             &write_metrics.write_time,
                         )
-                            .await
-                            .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
+                        .await
+                        .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
 
                         write_metrics
                             .input_rows
@@ -229,11 +230,11 @@ impl ShuffleWriterExec {
                         timer.done();
 
                         info!(
-                    "Executed partition {} in {} seconds. Statistics: {}",
-                    input_partition,
-                    now.elapsed().as_secs(),
-                    stats
-                );
+                            "Executed partition {} in {} seconds. Statistics: {}",
+                            input_partition,
+                            now.elapsed().as_secs(),
+                            stats
+                        );
 
                         Ok(vec![ShuffleWritePartition {
                             partition_id: input_partition as u64,
@@ -273,14 +274,15 @@ impl ShuffleWriterExec {
                             hashes_buf.clear();
                             hashes_buf.resize(arrays[0].len(), 0);
                             // Hash arrays and compute buckets based on number of partitions
-                            let hashes = create_hashes(&arrays, &random_state, hashes_buf)?;
+                            let hashes =
+                                create_hashes(&arrays, &random_state, hashes_buf)?;
                             let mut indices = vec![vec![]; num_output_partitions];
                             for (index, hash) in hashes.iter().enumerate() {
                                 indices[(*hash % num_output_partitions as u64) as usize]
                                     .push(index as u64)
                             }
                             for (output_partition, partition_indices) in
-                            indices.into_iter().enumerate()
+                                indices.into_iter().enumerate()
                             {
                                 let indices = partition_indices.into();
 
@@ -312,12 +314,17 @@ impl ShuffleWriterExec {
                                         path.push(&format!("{}", output_partition));
                                         std::fs::create_dir_all(&path)?;
 
-                                        path.push(format!("data-{}.arrow", input_partition));
+                                        path.push(format!(
+                                            "data-{}.arrow",
+                                            input_partition
+                                        ));
                                         let path = path.to_str().unwrap();
                                         info!("Writing results to {}", path);
 
-                                        let mut writer =
-                                            ShuffleWriter::new(path, stream.schema().as_ref())?;
+                                        let mut writer = ShuffleWriter::new(
+                                            path,
+                                            stream.schema().as_ref(),
+                                        )?;
 
                                         writer.write(&output_batch)?;
                                         writers[output_partition] = Some(writer);
@@ -363,42 +370,44 @@ impl ShuffleWriterExec {
                 }
             }
             OutputLocation::Executors(execs) => {
-                let write_metrics = ShuffleWriteMetrics::new(input_partition, &self.metrics);
+                let write_metrics =
+                    ShuffleWriteMetrics::new(input_partition, &self.metrics);
                 match &self.shuffle_output_partitioning {
                     None => {
                         assert!(execs.len() == 1);
 
-                        let (_, exec_host, exec_port) = execs[0].to_owned();
+                        let executor = execs[0].to_owned();
                         let timer = write_metrics.write_time.timer();
-                        info!("Writing results to host {}, port {}", exec_host, exec_port);
+                        info!(
+                            "Writing results to host {}, port {}",
+                            executor.host.as_str(),
+                            executor.port
+                        );
                         // stream results to network
 
-                        let mut ballista_client =
-                            BallistaClient::try_new(exec_host.as_str(), exec_port)
-                                .await
-                                .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
+                        let mut ballista_client = BallistaClient::try_new(
+                            executor.host.as_str(),
+                            executor.port,
+                        )
+                        .await
+                        .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
 
-                        ballista_client.push_partition(
-                            self.job_id.clone(),
-                            self.stage_id,
-                            0,
-                            stream,
-                        ).await
-                            .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
+                        ballista_client
+                            .push_partition(self.job_id.clone(), self.stage_id, 0, stream)
+                            .await
+                            .map_err(|e| {
+                                DataFusionError::Execution(format!("{:?}", e))
+                            })?;
 
-                        write_metrics
-                            .input_rows
-                            .add(0 as usize);
-                        write_metrics
-                            .output_rows
-                            .add(0 as usize);
+                        write_metrics.input_rows.add(0 as usize);
+                        write_metrics.output_rows.add(0 as usize);
                         timer.done();
 
                         info!(
-                    "Executed partition {} in {} seconds.",
-                    input_partition,
-                    now.elapsed().as_secs()
-                );
+                            "Executed partition {} in {} seconds.",
+                            input_partition,
+                            now.elapsed().as_secs()
+                        );
 
                         Ok(vec![ShuffleWritePartition {
                             partition_id: input_partition as u64,
@@ -416,9 +425,13 @@ impl ShuffleWriterExec {
                         let mut writers: Vec<BallistaClient> = vec![];
                         for i in 0..execs.len() {
                             let exec = &execs[i];
-                            writers.push(BallistaClient::try_new(&exec.to_owned().1, exec.to_owned().2)
-                                .await
-                                .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?);
+                            writers.push(
+                                BallistaClient::try_new(exec.host.as_str(), exec.port)
+                                    .await
+                                    .map_err(|e| {
+                                        DataFusionError::Execution(format!("{:?}", e))
+                                    })?,
+                            );
                         }
 
                         let hashes_buf = &mut vec![];
@@ -440,14 +453,15 @@ impl ShuffleWriterExec {
                             hashes_buf.clear();
                             hashes_buf.resize(arrays[0].len(), 0);
                             // Hash arrays and compute buckets based on number of partitions
-                            let hashes = create_hashes(&arrays, &random_state, hashes_buf)?;
+                            let hashes =
+                                create_hashes(&arrays, &random_state, hashes_buf)?;
                             let mut indices = vec![vec![]; num_output_partitions];
                             for (index, hash) in hashes.iter().enumerate() {
                                 indices[(*hash % num_output_partitions as u64) as usize]
                                     .push(index as u64)
                             }
                             for (output_partition, partition_indices) in
-                            indices.into_iter().enumerate()
+                                indices.into_iter().enumerate()
                             {
                                 let indices = partition_indices.into();
 
@@ -469,11 +483,21 @@ impl ShuffleWriterExec {
                                 let timer = write_metrics.write_time.timer();
                                 let num_rows = output_batch.num_rows();
                                 let schema = output_batch.schema();
-                                &mut writers[output_partition].push_partition(self.job_id.clone(),
-                                                                              self.stage_id,
-                                                                              output_partition,
-                                                                              Box::pin(MemoryStream::try_new(vec![output_batch], schema, None)?)).await.
-                                    map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
+                                &mut writers[output_partition]
+                                    .push_partition(
+                                        self.job_id.clone(),
+                                        self.stage_id,
+                                        output_partition,
+                                        Box::pin(MemoryStream::try_new(
+                                            vec![output_batch],
+                                            schema,
+                                            None,
+                                        )?),
+                                    )
+                                    .await
+                                    .map_err(|e| {
+                                        DataFusionError::Execution(format!("{:?}", e))
+                                    })?;
 
                                 write_metrics.output_rows.add(num_rows);
                                 timer.done();

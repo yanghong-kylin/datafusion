@@ -15,10 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::cell::Cell;
 use std::fmt::Formatter;
 use std::sync::{Arc, Mutex};
 use std::{any::Any, pin::Pin};
-use std::cell::Cell;
 
 use crate::client::BallistaClient;
 use crate::memory_stream::MemoryStream;
@@ -61,7 +61,7 @@ pub struct ShuffleStreamReaderExec {
     pub(crate) schema: SchemaRef,
 
     /// Partition count
-    partition_count: usize,
+    pub partition_count: usize,
 
     /// Record Batch receiver
     batch_receiver: Arc<Mutex<Vec<Receiver<ArrowResult<RecordBatch>>>>>,
@@ -160,7 +160,7 @@ impl ExecutionPlan for ShuffleStreamReaderExec {
 }
 
 fn stats_for_partitions(
-    partition_stats: impl Iterator<Item=PartitionStats>,
+    partition_stats: impl Iterator<Item = PartitionStats>,
 ) -> Statistics {
     // TODO stats: add column statistics to PartitionStats
     partition_stats.fold(
