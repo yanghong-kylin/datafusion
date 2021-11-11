@@ -277,7 +277,7 @@ impl SchedulerState {
         Ok(task_is_dead)
     }
 
-    pub async fn assign_next_schedulable_task(
+    pub async fn next_task_for_stage_scheduler(
         &self,
         executor_id: &str,
     ) -> Result<Option<(TaskStatus, Arc<dyn ExecutionPlan>)>> {
@@ -398,7 +398,7 @@ impl SchedulerState {
         Ok(None)
     }
 
-    pub async fn assign_next_schedulable_task2(
+    pub async fn next_task_for_aao_scheduler(
         &self,
         executor_id: &str,
     ) -> Result<Option<(TaskStatus, Arc<dyn ExecutionPlan>)>> {
