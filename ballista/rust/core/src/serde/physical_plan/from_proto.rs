@@ -23,10 +23,11 @@ use std::sync::Arc;
 
 use crate::error::BallistaError;
 use crate::execution_plans::{
-    ShuffleReaderExec, ShuffleWriterExec, UnresolvedShuffleExec,
+    ShuffleStreamReaderExec, ShuffleReaderExec, ShuffleWriterExec, UnresolvedShuffleExec,
 };
 use crate::serde::protobuf::repartition_exec_node::PartitionMethod;
 use crate::serde::protobuf::ShuffleReaderPartition;
+use crate::serde::scheduler::ExecutorMeta;
 use crate::serde::scheduler::PartitionLocation;
 use crate::serde::{from_proto_binary_op, proto_error, protobuf, str_to_byte};
 use crate::{convert_box_required, convert_required, into_required};
@@ -380,14 +381,39 @@ impl TryInto<Arc<dyn ExecutionPlan>> for &protobuf::PhysicalPlanNode {
                 let output_partitioning = parse_protobuf_hash_partitioning(
                     shuffle_writer.output_partitioning.as_ref(),
                 )?;
-
-                Ok(Arc::new(ShuffleWriterExec::try_new(
-                    shuffle_writer.job_id.clone(),
-                    shuffle_writer.stage_id as usize,
-                    input,
-                    "".to_string(), // this is intentional but hacky - the executor will fill this in
-                    output_partitioning,
-                )?))
+                if shuffle_writer.execs.len() == 0 {
+                    Ok(Arc::new(ShuffleWriterExec::try_new_pull_shuffle(
+                        shuffle_writer.job_id.clone(),
+                        shuffle_writer.stage_id as usize,
+                        input,
+                        "".to_string(), // this is intentional but hacky - the executor will fill this in
+                        output_partitioning,
+                    )?))
+                } else {
+                    let _execs: Vec<ExecutorMeta> = shuffle_writer
+                        .execs
+                        .to_owned()
+                        .into_iter()
+                        .map(|e| e.into())
+                        .collect();
+                    Ok(Arc::new(ShuffleWriterExec::try_new_push_shuffle(
+                        shuffle_writer.job_id.clone(),
+                        shuffle_writer.stage_id as usize,
+                        input,
+                        _execs,
+                        output_partitioning,
+                    )?))
+                }
+            }
+            PhysicalPlanType::ShuffleStreamReader(shuffle_stream_reader) => {
+                let schema = Arc::new(convert_required!(shuffle_stream_reader.schema)?);
+                let shuffle_reader = ShuffleStreamReaderExec::new(
+                    shuffle_stream_reader.job_id.clone(),
+                    shuffle_stream_reader.stage_id as usize,
+                    schema,
+                    shuffle_stream_reader.partition_count as usize,
+                );
+                Ok(Arc::new(shuffle_reader))
             }
             PhysicalPlanType::ShuffleReader(shuffle_reader) => {
                 let schema = Arc::new(convert_required!(shuffle_reader.schema)?);

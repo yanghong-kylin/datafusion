@@ -68,7 +68,10 @@ use crate::serde::protobuf::repartition_exec_node::PartitionMethod;
 use crate::serde::scheduler::PartitionLocation;
 use crate::serde::{protobuf, BallistaError};
 use crate::{
-    execution_plans::{ShuffleReaderExec, ShuffleWriterExec, UnresolvedShuffleExec},
+    execution_plans::{
+        OutputLocation, ShuffleReaderExec, ShuffleStreamReaderExec, ShuffleWriterExec,
+        UnresolvedShuffleExec,
+    },
     serde::byte_to_string,
 };
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
@@ -272,6 +275,17 @@ impl TryInto<protobuf::PhysicalPlanNode> for Arc<dyn ExecutionPlan> {
                     },
                 )),
             })
+        } else if let Some(exec) = plan.downcast_ref::<ShuffleStreamReaderExec>() {
+            Ok(protobuf::PhysicalPlanNode {
+                physical_plan_type: Some(PhysicalPlanType::ShuffleStreamReader(
+                    protobuf::ShuffleStreamReaderExecNode {
+                        job_id: exec.job_id.clone(),
+                        stage_id: exec.stage_id as u32,
+                        partition_count: exec.partition_count as u64,
+                        schema: Some(exec.schema().as_ref().into()),
+                    },
+                )),
+            })
         } else if let Some(exec) = plan.downcast_ref::<ShuffleReaderExec>() {
             let mut partition = vec![];
             for location in &exec.partition {
@@ -377,16 +391,34 @@ impl TryInto<protobuf::PhysicalPlanNode> for Arc<dyn ExecutionPlan> {
                     )))
                 }
             };
-            Ok(protobuf::PhysicalPlanNode {
-                physical_plan_type: Some(PhysicalPlanType::ShuffleWriter(Box::new(
-                    protobuf::ShuffleWriterExecNode {
-                        job_id: exec.job_id().to_string(),
-                        stage_id: exec.stage_id() as u32,
-                        input: Some(Box::new(input)),
-                        output_partitioning,
-                    },
-                ))),
-            })
+            match &exec.output_loc {
+                OutputLocation::LocalDir(_) => Ok(protobuf::PhysicalPlanNode {
+                    physical_plan_type: Some(PhysicalPlanType::ShuffleWriter(Box::new(
+                        protobuf::ShuffleWriterExecNode {
+                            job_id: exec.job_id().to_string(),
+                            stage_id: exec.stage_id() as u32,
+                            input: Some(Box::new(input)),
+                            output_partitioning,
+                            execs: Vec::new(),
+                        },
+                    ))),
+                }),
+                OutputLocation::Executors(executors) => {
+                    let _execs: Vec<protobuf::ExecutorMetadata> =
+                        executors.to_owned().into_iter().map(|e| e.into()).collect();
+                    Ok(protobuf::PhysicalPlanNode {
+                        physical_plan_type: Some(PhysicalPlanType::ShuffleWriter(
+                            Box::new(protobuf::ShuffleWriterExecNode {
+                                job_id: exec.job_id().to_string(),
+                                stage_id: exec.stage_id() as u32,
+                                input: Some(Box::new(input)),
+                                output_partitioning,
+                                execs: _execs,
+                            }),
+                        )),
+                    })
+                }
+            }
         } else if let Some(exec) = plan.downcast_ref::<UnresolvedShuffleExec>() {
             Ok(protobuf::PhysicalPlanNode {
                 physical_plan_type: Some(PhysicalPlanType::Unresolved(

@@ -35,7 +35,9 @@ use ballista_scheduler::api::{get_routes, EitherBody, Error};
 use ballista_scheduler::state::EtcdClient;
 #[cfg(feature = "sled")]
 use ballista_scheduler::state::StandaloneClient;
-use ballista_scheduler::{state::ConfigBackendClient, ConfigBackend, SchedulerServer};
+use ballista_scheduler::{
+    state::ConfigBackendClient, ConfigBackend, SchedulerPolicy, SchedulerServer,
+};
 
 use log::info;
 
@@ -57,6 +59,7 @@ async fn start_server(
     config_backend: Arc<dyn ConfigBackendClient>,
     namespace: String,
     addr: SocketAddr,
+    policy: SchedulerPolicy,
 ) -> Result<()> {
     info!(
         "Ballista v{} Scheduler listening on {:?}",
@@ -69,6 +72,7 @@ async fn start_server(
                 config_backend.clone(),
                 namespace.clone(),
                 request.remote_addr().ip(),
+                policy,
             );
             let scheduler_grpc_server =
                 SchedulerGrpcServer::new(scheduler_server.clone());
@@ -158,6 +162,8 @@ async fn main() -> Result<()> {
             )
         }
     };
-    start_server(client, namespace, addr).await?;
+
+    let policy: SchedulerPolicy = opt.scheduler_policy;
+    start_server(client, namespace, addr, policy).await?;
     Ok(())
 }

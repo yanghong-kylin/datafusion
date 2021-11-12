@@ -477,6 +477,7 @@ message PhysicalPlanNode {
     ShuffleWriterExecNode shuffle_writer = 18;
     CrossJoinExecNode cross_join = 19;
     AvroScanExecNode avro_scan = 20;
+    ShuffleStreamReaderExecNode shuffle_stream_reader = 99;
   }
 }
 
@@ -708,6 +709,14 @@ message ShuffleWriterExecNode {
   uint32 stage_id = 2;
   PhysicalPlanNode input = 3;
   PhysicalHashRepartition output_partitioning = 4;
+  repeated ExecutorMetadata execs = 5;
+}
+
+message ShuffleStreamReaderExecNode {
+  string job_id = 1;
+  uint32 stage_id = 2;
+  uint64 partition_count = 3;
+  Schema schema = 4;
 }
 
 message ShuffleReaderExecNode {
@@ -772,6 +781,7 @@ message Action {
   oneof ActionType {
     // Fetch a partition from an executor
     FetchPartition fetch_partition = 3;
+    PushPartition push_partition = 99;
   }
 
   // configuration settings
@@ -794,6 +804,12 @@ message FetchPartition {
   uint32 stage_id = 2;
   uint32 partition_id = 3;
   string path = 4;
+}
+
+message PushPartition {
+  string job_id = 1;
+  uint32 stage_id = 2;
+  uint32 partition_id = 3;
 }
 
 // Mapping from partition id to executor id

@@ -23,8 +23,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ballista_core::error::{BallistaError, Result};
+use ballista_core::serde::scheduler::ExecutorMeta;
 use ballista_core::{
-    execution_plans::{ShuffleReaderExec, ShuffleWriterExec, UnresolvedShuffleExec},
+    execution_plans::{
+        ShuffleReaderExec, ShuffleStreamReaderExec, ShuffleWriterExec,
+        UnresolvedShuffleExec,
+    },
     serde::scheduler::PartitionLocation,
 };
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
@@ -61,10 +65,11 @@ impl DistributedPlanner {
         &'a mut self,
         job_id: &'a str,
         execution_plan: Arc<dyn ExecutionPlan>,
+        push_based_shuffle: bool,
     ) -> Result<Vec<Arc<ShuffleWriterExec>>> {
         info!("planning query stages");
         let (new_plan, mut stages) = self
-            .plan_query_stages_internal(job_id, execution_plan)
+            .plan_query_stages_internal(job_id, execution_plan, push_based_shuffle)
             .await?;
         stages.push(create_shuffle_writer(
             job_id,
@@ -82,6 +87,7 @@ impl DistributedPlanner {
         &'a mut self,
         job_id: &'a str,
         execution_plan: Arc<dyn ExecutionPlan>,
+        push_based_shuffle: bool,
     ) -> BoxFuture<'a, Result<PartialQueryStageResult>> {
         async move {
             // recurse down and replace children
@@ -93,7 +99,7 @@ impl DistributedPlanner {
             let mut children = vec![];
             for child in execution_plan.children() {
                 let (new_child, mut child_stages) = self
-                    .plan_query_stages_internal(job_id, child.clone())
+                    .plan_query_stages_internal(job_id, child.clone(), push_based_shuffle)
                     .await?;
                 children.push(new_child);
                 stages.append(&mut child_stages);
@@ -103,52 +109,99 @@ impl DistributedPlanner {
                 .as_any()
                 .downcast_ref::<CoalescePartitionsExec>()
             {
-                let shuffle_writer = create_shuffle_writer(
-                    job_id,
-                    self.next_stage_id(),
-                    children[0].clone(),
-                    None,
-                )?;
-                let unresolved_shuffle = Arc::new(UnresolvedShuffleExec::new(
-                    shuffle_writer.stage_id(),
-                    shuffle_writer.schema(),
-                    shuffle_writer.output_partitioning().partition_count(),
-                    shuffle_writer
-                        .shuffle_output_partitioning()
-                        .map(|p| p.partition_count())
-                        .unwrap_or_else(|| {
-                            shuffle_writer.output_partitioning().partition_count()
-                        }),
-                ));
-                stages.push(shuffle_writer);
-                Ok((
-                    coalesce.with_new_children(vec![unresolved_shuffle])?,
-                    stages,
-                ))
+                let shuffle_writer = if push_based_shuffle {
+                    create_push_shuffle_writer(
+                        job_id,
+                        self.next_stage_id(),
+                        children[0].clone(),
+                        None,
+                    )?
+                } else {
+                    create_shuffle_writer(
+                        job_id,
+                        self.next_stage_id(),
+                        children[0].clone(),
+                        None,
+                    )?
+                };
+
+                if push_based_shuffle {
+                    let shuffle_reader = Arc::new(ShuffleStreamReaderExec::new(
+                        job_id.to_string(),
+                        shuffle_writer.stage_id(),
+                        shuffle_writer.schema(),
+                        1,
+                    ));
+                    stages.push(shuffle_writer);
+                    Ok((coalesce.with_new_children(vec![shuffle_reader])?, stages))
+                } else {
+                    let unresolved_shuffle = Arc::new(UnresolvedShuffleExec::new(
+                        shuffle_writer.stage_id(),
+                        shuffle_writer.schema(),
+                        shuffle_writer.output_partitioning().partition_count(),
+                        shuffle_writer
+                            .shuffle_output_partitioning()
+                            .map(|p| p.partition_count())
+                            .unwrap_or_else(|| {
+                                shuffle_writer.output_partitioning().partition_count()
+                            }),
+                    ));
+                    stages.push(shuffle_writer);
+                    Ok((
+                        coalesce.with_new_children(vec![unresolved_shuffle])?,
+                        stages,
+                    ))
+                }
             } else if let Some(repart) =
                 execution_plan.as_any().downcast_ref::<RepartitionExec>()
             {
                 match repart.output_partitioning() {
-                    Partitioning::Hash(_, _) => {
-                        let shuffle_writer = create_shuffle_writer(
-                            job_id,
-                            self.next_stage_id(),
-                            children[0].clone(),
-                            Some(repart.partitioning().to_owned()),
-                        )?;
-                        let unresolved_shuffle = Arc::new(UnresolvedShuffleExec::new(
-                            shuffle_writer.stage_id(),
-                            shuffle_writer.schema(),
-                            shuffle_writer.output_partitioning().partition_count(),
-                            shuffle_writer
-                                .shuffle_output_partitioning()
-                                .map(|p| p.partition_count())
-                                .unwrap_or_else(|| {
-                                    shuffle_writer.output_partitioning().partition_count()
-                                }),
-                        ));
-                        stages.push(shuffle_writer);
-                        Ok((unresolved_shuffle, stages))
+                    Partitioning::Hash(_, part) => {
+                        let shuffle_writer = if push_based_shuffle {
+                            create_push_shuffle_writer(
+                                job_id,
+                                self.next_stage_id(),
+                                children[0].clone(),
+                                Some(repart.partitioning().to_owned()),
+                            )?
+                        } else {
+                            create_shuffle_writer(
+                                job_id,
+                                self.next_stage_id(),
+                                children[0].clone(),
+                                Some(repart.partitioning().to_owned()),
+                            )?
+                        };
+
+                        if push_based_shuffle {
+                            let shuffle_reader = Arc::new(ShuffleStreamReaderExec::new(
+                                job_id.to_string(),
+                                shuffle_writer.stage_id(),
+                                shuffle_writer.schema(),
+                                1, // TODD need to check the correctness
+                            ));
+                            stages.push(shuffle_writer);
+                            Ok((repart.with_new_children(vec![shuffle_reader])?, stages))
+                        } else {
+                            let unresolved_shuffle =
+                                Arc::new(UnresolvedShuffleExec::new(
+                                    shuffle_writer.stage_id(),
+                                    shuffle_writer.schema(),
+                                    shuffle_writer
+                                        .output_partitioning()
+                                        .partition_count(),
+                                    shuffle_writer
+                                        .shuffle_output_partitioning()
+                                        .map(|p| p.partition_count())
+                                        .unwrap_or_else(|| {
+                                            shuffle_writer
+                                                .output_partitioning()
+                                                .partition_count()
+                                        }),
+                                ));
+                            stages.push(shuffle_writer);
+                            Ok((unresolved_shuffle, stages))
+                        }
                     }
                     _ => {
                         // remove any non-hash repartition from the distributed plan
@@ -229,17 +282,58 @@ pub fn remove_unresolved_shuffles(
     Ok(stage.with_new_children(new_children)?)
 }
 
+pub fn update_shuffle_locs(
+    stage: Arc<dyn ExecutionPlan>,
+    output_locs: Vec<ExecutorMeta>,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    if let Some(shuffle_writer) = stage.as_any().downcast_ref::<ShuffleWriterExec>() {
+        if shuffle_writer.is_push_shuffle() {
+            assert_eq!(
+                output_locs.len(),
+                shuffle_writer.output_partitioning().partition_count()
+            );
+            let new_shuffle_writer = Arc::new(ShuffleWriterExec::try_new_push_shuffle(
+                shuffle_writer.job_id().to_string(),
+                shuffle_writer.stage_id(),
+                shuffle_writer.children()[0].clone(),
+                output_locs,
+                shuffle_writer.shuffle_output_partitioning().cloned(),
+            )?);
+            Ok(new_shuffle_writer)
+        } else {
+            Ok(stage)
+        }
+    } else {
+        Ok(stage)
+    }
+}
+
 fn create_shuffle_writer(
     job_id: &str,
     stage_id: usize,
     plan: Arc<dyn ExecutionPlan>,
     partitioning: Option<Partitioning>,
 ) -> Result<Arc<ShuffleWriterExec>> {
-    Ok(Arc::new(ShuffleWriterExec::try_new(
+    Ok(Arc::new(ShuffleWriterExec::try_new_pull_shuffle(
         job_id.to_owned(),
         stage_id,
         plan,
         "".to_owned(), // executor will decide on the work_dir path
+        partitioning,
+    )?))
+}
+
+fn create_push_shuffle_writer(
+    job_id: &str,
+    stage_id: usize,
+    plan: Arc<dyn ExecutionPlan>,
+    partitioning: Option<Partitioning>,
+) -> Result<Arc<ShuffleWriterExec>> {
+    Ok(Arc::new(ShuffleWriterExec::try_new_push_shuffle(
+        job_id.to_owned(),
+        stage_id,
+        plan,
+        Vec::new(), // executors will be decided later during task scheduling
         partitioning,
     )?))
 }
@@ -290,7 +384,7 @@ mod test {
         let mut planner = DistributedPlanner::new();
         let job_uuid = Uuid::new_v4();
         let stages = planner
-            .plan_query_stages(&job_uuid.to_string(), plan)
+            .plan_query_stages(&job_uuid.to_string(), plan, false)
             .await?;
         for stage in &stages {
             println!("{}", displayable(stage.as_ref()).indent().to_string());
@@ -404,7 +498,7 @@ order by
         let mut planner = DistributedPlanner::new();
         let job_uuid = Uuid::new_v4();
         let stages = planner
-            .plan_query_stages(&job_uuid.to_string(), plan)
+            .plan_query_stages(&job_uuid.to_string(), plan, false)
             .await?;
         for stage in &stages {
             println!("{}", displayable(stage.as_ref()).indent().to_string());
@@ -552,7 +646,7 @@ order by
         let mut planner = DistributedPlanner::new();
         let job_uuid = Uuid::new_v4();
         let stages = planner
-            .plan_query_stages(&job_uuid.to_string(), plan)
+            .plan_query_stages(&job_uuid.to_string(), plan, false)
             .await?;
 
         let partial_hash = stages[0].children()[0].clone();

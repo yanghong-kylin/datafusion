@@ -27,7 +27,7 @@ use std::{
 use tokio::net::TcpListener;
 use tonic::transport::Server;
 
-use crate::{state::StandaloneClient, SchedulerServer};
+use crate::{state::StandaloneClient, SchedulerPolicy, SchedulerServer};
 
 pub async fn new_standalone_scheduler() -> Result<SocketAddr> {
     let client = StandaloneClient::try_new_temporary()?;
@@ -36,6 +36,7 @@ pub async fn new_standalone_scheduler() -> Result<SocketAddr> {
         Arc::new(client),
         "ballista".to_string(),
         IpAddr::V4(Ipv4Addr::LOCALHOST),
+        SchedulerPolicy::Staged
     ));
     // Let the OS assign a random, free port
     let listener = TcpListener::bind("localhost:0").await?;
