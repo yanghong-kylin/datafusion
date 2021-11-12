@@ -38,7 +38,8 @@ pub struct Executor {
 
     /// Channels for sending partial shuffle partitions to stream shuffle reader.
     /// Key is the jobId + stageId.
-    channels: RwLock<HashMap<(String, usize), Vec<Sender<ArrowResult<RecordBatch>>>>>,
+    /// TODO implement clean up logic
+    pub channels: RwLock<HashMap<(String, usize), Vec<Sender<ArrowResult<RecordBatch>>>>>,
 }
 
 impl Executor {
@@ -64,7 +65,7 @@ impl Executor {
         _shuffle_output_partitioning: Option<Partitioning>,
     ) -> Result<Vec<protobuf::ShuffleWritePartition>, BallistaError> {
         let exec = if let Some(shuffle_writer) =
-        plan.as_any().downcast_ref::<ShuffleWriterExec>()
+            plan.as_any().downcast_ref::<ShuffleWriterExec>()
         {
             // find all the stream shuffle readers and bind them to the context
             let stream_shuffle_readers = find_stream_shuffle_readers(plan.clone())?;

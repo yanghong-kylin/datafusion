@@ -32,8 +32,9 @@ use crate::serde::scheduler::{
 };
 
 use arrow_flight::utils::flight_data_to_arrow_batch;
-use arrow_flight::Ticket;
 use arrow_flight::{flight_service_client::FlightServiceClient, FlightData};
+use arrow_flight::{FlightDescriptor, SchemaAsIpc, Ticket};
+use datafusion::arrow::ipc::writer::IpcWriteOptions;
 use datafusion::arrow::{
     array::{StringArray, StructArray},
     datatypes::{Schema, SchemaRef},
@@ -45,6 +46,7 @@ use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
 use datafusion::{logical_plan::LogicalPlan, physical_plan::RecordBatchStream};
 use futures::{Stream, StreamExt};
 use log::debug;
+use log::warn;
 use prost::Message;
 use tonic::Streaming;
 use uuid::Uuid;
@@ -105,7 +107,31 @@ impl BallistaClient {
             stage_id,
             partition_id,
         };
-        self.execute_action(&action).await;
+        let serialized_action: protobuf::Action = action.try_into()?;
+        let mut cmd: Vec<u8> = Vec::with_capacity(serialized_action.encoded_len());
+        serialized_action
+            .encode(&mut cmd)
+            .map_err(|e| BallistaError::General(format!("{:?}", e)))?;
+
+        // add an initial FlightData message that sends schema and cmd
+        let options = datafusion::arrow::ipc::writer::IpcWriteOptions::default();
+        let schema_flight_data =
+            SchemaAsIpc::new(input.schema().as_ref(), &options).into();
+
+        let fd = Some(FlightDescriptor::new_cmd(cmd));
+        let cmd_data = FlightData {
+            flight_descriptor: fd,
+            ..schema_flight_data
+        };
+
+        let flight_stream = RecordBatchToFlightDataStream::new(input, cmd_data, options);
+
+        self.flight_client
+            .do_put(flight_stream)
+            .await
+            .map_err(|e| BallistaError::General(format!("{:?}", e)))?
+            .into_inner();
+
         Ok(())
     }
 
@@ -190,5 +216,64 @@ impl Stream for FlightDataStream {
 impl RecordBatchStream for FlightDataStream {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
+    }
+}
+
+struct RecordBatchToFlightDataStream {
+    batch: SendableRecordBatchStream,
+    buffered_data: Vec<FlightData>,
+    options: IpcWriteOptions,
+}
+
+impl RecordBatchToFlightDataStream {
+    pub fn new(
+        batch: SendableRecordBatchStream,
+        schema: FlightData,
+        options: IpcWriteOptions,
+    ) -> Self {
+        Self {
+            batch,
+            buffered_data: vec![schema],
+            options,
+        }
+    }
+}
+
+impl Stream for RecordBatchToFlightDataStream {
+    type Item = FlightData;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let self_mut = self.get_mut();
+        if let Some(event) = self_mut.buffered_data.pop() {
+            Poll::Ready(Some(event))
+        } else {
+            loop {
+                match self_mut.batch.poll_next_unpin(cx) {
+                    Poll::Ready(Some(Err(e))) => {
+                        warn!("Error when poll input batches : {}", e);
+                        continue;
+                    }
+                    Poll::Ready(Some(Ok(record_batch))) => {
+                        let converted_chunk =
+                            arrow_flight::utils::flight_data_from_arrow_batch(
+                                &record_batch,
+                                &self_mut.options,
+                            );
+                        self_mut.buffered_data.extend(converted_chunk.0.into_iter());
+                        self_mut.buffered_data.push(converted_chunk.1);
+                        if let Some(event) = self_mut.buffered_data.pop() {
+                            return Poll::Ready(Some(event));
+                        } else {
+                            continue;
+                        }
+                    }
+                    Poll::Ready(None) => return Poll::Ready(None),
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+        }
     }
 }
