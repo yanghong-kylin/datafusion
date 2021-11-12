@@ -450,7 +450,7 @@ impl SchedulerState {
                                 .unwrap()
                                 .clone();
 
-                            temp_loc.push((executor_meta));
+                            temp_loc.push(executor_meta);
                         } else {
                             debug!(
                                 "Stage {} output partition {} has not scheduled yet",

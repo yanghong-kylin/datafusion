@@ -223,7 +223,9 @@ impl FlightService for BallistaFlightService {
         while let Some(flight_data) = stream.message().await? {
             let record_batch =
                 flight_data_to_arrow_batch(&flight_data, arrow_schema_arc.clone(), &[]);
-            sender.send(record_batch);
+
+            // ignore the error
+            sender.send(record_batch).await.ok();
         }
 
         Ok(Response::new(

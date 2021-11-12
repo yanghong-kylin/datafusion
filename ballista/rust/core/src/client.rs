@@ -243,7 +243,7 @@ impl Stream for RecordBatchToFlightDataStream {
     type Item = FlightData;
 
     fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         let self_mut = self.get_mut();

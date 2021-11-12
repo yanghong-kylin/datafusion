@@ -89,6 +89,7 @@ impl ShuffleStreamReaderExec {
     }
 
     pub fn create_record_batch_channel(&self) -> Sender<ArrowResult<RecordBatch>> {
+        info!("ShuffleStreamReaderExec::create_record_batch_channel");
         let (response_tx, response_rx): (
             Sender<ArrowResult<RecordBatch>>,
             Receiver<ArrowResult<RecordBatch>>,
@@ -157,27 +158,4 @@ impl ExecutionPlan for ShuffleStreamReaderExec {
         // TODD need to implement
         Statistics::default()
     }
-}
-
-fn stats_for_partitions(
-    partition_stats: impl Iterator<Item = PartitionStats>,
-) -> Statistics {
-    // TODO stats: add column statistics to PartitionStats
-    partition_stats.fold(
-        Statistics {
-            is_exact: true,
-            num_rows: Some(0),
-            total_byte_size: Some(0),
-            column_statistics: None,
-        },
-        |mut acc, part| {
-            // if any statistic is unkown it makes the entire statistic unkown
-            acc.num_rows = acc.num_rows.zip(part.num_rows).map(|(a, b)| a + b as usize);
-            acc.total_byte_size = acc
-                .total_byte_size
-                .zip(part.num_bytes)
-                .map(|(a, b)| a + b as usize);
-            acc
-        },
-    )
 }

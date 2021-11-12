@@ -55,7 +55,7 @@ use ballista_core::serde::protobuf::{
 use ballista_core::serde::scheduler::ExecutorMeta;
 
 use clap::arg_enum;
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::{displayable, ExecutionPlan};
 #[cfg(feature = "sled")]
 extern crate sled_package as sled;
 
@@ -238,7 +238,7 @@ impl SchedulerGrpc for SchedulerServer {
             }
             let task: Result<Option<_>, Status> = if can_accept_task {
                 let plan = match self.policy {
-                    Staged => self
+                    SchedulerPolicy::Staged => self
                         .state
                         .next_task_for_stage_scheduler(&metadata.id)
                         .await
@@ -247,7 +247,7 @@ impl SchedulerGrpc for SchedulerServer {
                             error!("{}", msg);
                             tonic::Status::internal(msg)
                         })?,
-                    AllAtOnce => self
+                    SchedulerPolicy::AllAtOnce => self
                         .state
                         .next_task_for_aao_scheduler(&metadata.id)
                         .await
@@ -417,8 +417,8 @@ impl SchedulerGrpc for SchedulerServer {
             let state = self.state.clone();
             let job_id_spawn = job_id.clone();
             let push_based_shuffle = match self.policy {
-                Staged => false,
-                AllAtOnce => true,
+                SchedulerPolicy::Staged => false,
+                SchedulerPolicy::AllAtOnce => true,
             };
             tokio::spawn(async move {
                 // create physical plan using DataFusion
@@ -458,8 +458,6 @@ impl SchedulerGrpc for SchedulerServer {
                         tonic::Status::internal(msg)
                     }));
 
-                println!("Optimized_plan {:?}", optimized_plan);
-
                 debug!("Calculated optimized plan: {:?}", optimized_plan);
 
                 let plan = fail_job!(datafusion_ctx
@@ -471,7 +469,10 @@ impl SchedulerGrpc for SchedulerServer {
                         tonic::Status::internal(msg)
                     }));
 
-                println!("Physical_plan {:?}", plan);
+                println!(
+                    "=== Physical plan ===\n{}\n",
+                    displayable(plan.as_ref()).indent().to_string()
+                );
 
                 info!(
                     "DataFusion created physical plan in {} milliseconds",
@@ -505,7 +506,11 @@ impl SchedulerGrpc for SchedulerServer {
 
                 // save stages into state
                 for shuffle_writer in stages {
-                    println!("stage {:?}", shuffle_writer);
+                    println!(
+                        "=== Shuffle Stage plan ===\n{}\n",
+                        displayable(shuffle_writer.children()[0].as_ref()).indent().to_string()
+                    );
+
                     fail_job!(state
                         .save_stage_plan(
                             &job_id_spawn,

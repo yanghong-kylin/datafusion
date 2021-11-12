@@ -70,11 +70,11 @@ impl Executor {
             // find all the stream shuffle readers and bind them to the context
             let stream_shuffle_readers = find_stream_shuffle_readers(plan.clone())?;
             for shuffle_reader in stream_shuffle_readers {
-                let _jobId = shuffle_reader.job_id.clone();
-                let _stageId = shuffle_reader.stage_id;
+                let _job_id = shuffle_reader.job_id.clone();
+                let _stage_id = shuffle_reader.stage_id;
                 {
                     let mut _map = self.channels.write().unwrap();
-                    let _senders = _map.entry((_jobId, _stageId)).or_insert(Vec::new());
+                    let _senders = _map.entry((_job_id, _stage_id)).or_insert(Vec::new());
                     _senders.push(shuffle_reader.create_record_batch_channel());
                 }
             }

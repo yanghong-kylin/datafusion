@@ -178,7 +178,7 @@ impl DistributedPlanner {
                                 job_id.to_string(),
                                 shuffle_writer.stage_id(),
                                 shuffle_writer.schema(),
-                                part,
+                                1, // TODD need to check the correctness
                             ));
                             stages.push(shuffle_writer);
                             Ok((repart.with_new_children(vec![shuffle_reader])?, stages))
