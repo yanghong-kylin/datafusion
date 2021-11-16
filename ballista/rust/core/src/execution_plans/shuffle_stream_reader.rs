@@ -46,15 +46,13 @@ use hashbrown::HashMap;
 use log::info;
 use std::time::Instant;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::task;
 
 /// ShuffleStreamReaderExec reads partitions streams that are pushed by the multiple ShuffleWriterExec
 /// being executed by an executor
 #[derive(Debug, Clone)]
 pub struct ShuffleStreamReaderExec {
-    /// Unique ID for the job (query) that this stage is a part of
-    pub job_id: String,
-
-    /// Unique query stage ID within the job
+    /// The query stage id which the shuffle reader depends on
     pub stage_id: usize,
 
     /// Schema
@@ -72,14 +70,8 @@ pub struct ShuffleStreamReaderExec {
 
 impl ShuffleStreamReaderExec {
     /// Create a new ShuffleStreamReaderExec
-    pub fn new(
-        job_id: String,
-        stage_id: usize,
-        schema: SchemaRef,
-        partition_count: usize,
-    ) -> Self {
+    pub fn new(stage_id: usize, schema: SchemaRef, partition_count: usize) -> Self {
         Self {
-            job_id,
             stage_id,
             schema,
             partition_count,
@@ -89,13 +81,33 @@ impl ShuffleStreamReaderExec {
     }
 
     pub fn create_record_batch_channel(&self) -> Sender<ArrowResult<RecordBatch>> {
-        info!("ShuffleStreamReaderExec::create_record_batch_channel");
         let (response_tx, response_rx): (
             Sender<ArrowResult<RecordBatch>>,
             Receiver<ArrowResult<RecordBatch>>,
         ) = channel(100);
         self.batch_receiver.lock().unwrap().push(response_rx);
         response_tx
+    }
+
+    /// Returns the the streaming shuffle readers in the execution plan
+    pub fn find_stream_shuffle_readers(
+        plan: Arc<dyn ExecutionPlan>,
+    ) -> Vec<ShuffleStreamReaderExec> {
+        if let Some(shuffle_reader) =
+            plan.as_any().downcast_ref::<ShuffleStreamReaderExec>()
+        {
+            vec![shuffle_reader.clone()]
+        } else {
+            let readers = plan
+                .children()
+                .into_iter()
+                .map(|child| ShuffleStreamReaderExec::find_stream_shuffle_readers(child))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .flatten()
+                .collect();
+            readers
+        }
     }
 }
 
@@ -131,11 +143,28 @@ impl ExecutionPlan for ShuffleStreamReaderExec {
 
     async fn execute(&self, partition: usize) -> Result<SendableRecordBatchStream> {
         info!("ShuffleStreamReaderExec::execute({})", partition);
-        let schema = &self.schema;
-        let rx = self.batch_receiver.lock().unwrap().pop().unwrap();
-        let join_handle = tokio::task::spawn(async move {});
+        let (sender, receiver): (
+            Sender<ArrowResult<RecordBatch>>,
+            Receiver<ArrowResult<RecordBatch>>,
+        ) = channel(2);
 
-        Ok(RecordBatchReceiverStream::create(schema, rx, join_handle))
+        let schema = &self.schema;
+        let mut rx = self.batch_receiver.lock().unwrap().pop().unwrap();
+        let join_handle = task::spawn_blocking(move || {
+            if let Some(batch) = rx.blocking_recv() {
+                sender.blocking_send(batch);
+            }
+        });
+        Ok(RecordBatchReceiverStream::create(
+            schema,
+            receiver,
+            join_handle,
+        ))
+
+        // let schema = &self.schema;
+        // let rx = self.batch_receiver.lock().unwrap().pop().unwrap();
+        // let join_handle = tokio::task::spawn(async move {});
+        // Ok(RecordBatchReceiverStream::create(schema, rx, join_handle))
     }
 
     fn fmt_as(

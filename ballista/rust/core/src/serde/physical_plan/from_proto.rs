@@ -381,7 +381,7 @@ impl TryInto<Arc<dyn ExecutionPlan>> for &protobuf::PhysicalPlanNode {
                 let output_partitioning = parse_protobuf_hash_partitioning(
                     shuffle_writer.output_partitioning.as_ref(),
                 )?;
-                if shuffle_writer.execs.len() == 0 {
+                if !shuffle_writer.push_shuffle {
                     Ok(Arc::new(ShuffleWriterExec::try_new_pull_shuffle(
                         shuffle_writer.job_id.clone(),
                         shuffle_writer.stage_id as usize,
@@ -408,7 +408,6 @@ impl TryInto<Arc<dyn ExecutionPlan>> for &protobuf::PhysicalPlanNode {
             PhysicalPlanType::ShuffleStreamReader(shuffle_stream_reader) => {
                 let schema = Arc::new(convert_required!(shuffle_stream_reader.schema)?);
                 let shuffle_reader = ShuffleStreamReaderExec::new(
-                    shuffle_stream_reader.job_id.clone(),
                     shuffle_stream_reader.stage_id as usize,
                     schema,
                     shuffle_stream_reader.partition_count as usize,

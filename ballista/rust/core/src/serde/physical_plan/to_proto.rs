@@ -279,7 +279,6 @@ impl TryInto<protobuf::PhysicalPlanNode> for Arc<dyn ExecutionPlan> {
             Ok(protobuf::PhysicalPlanNode {
                 physical_plan_type: Some(PhysicalPlanType::ShuffleStreamReader(
                     protobuf::ShuffleStreamReaderExecNode {
-                        job_id: exec.job_id.clone(),
                         stage_id: exec.stage_id as u32,
                         partition_count: exec.partition_count as u64,
                         schema: Some(exec.schema().as_ref().into()),
@@ -399,6 +398,7 @@ impl TryInto<protobuf::PhysicalPlanNode> for Arc<dyn ExecutionPlan> {
                             stage_id: exec.stage_id() as u32,
                             input: Some(Box::new(input)),
                             output_partitioning,
+                            push_shuffle: false,
                             execs: Vec::new(),
                         },
                     ))),
@@ -413,6 +413,7 @@ impl TryInto<protobuf::PhysicalPlanNode> for Arc<dyn ExecutionPlan> {
                                 stage_id: exec.stage_id() as u32,
                                 input: Some(Box::new(input)),
                                 output_partitioning,
+                                push_shuffle: true,
                                 execs: _execs,
                             }),
                         )),

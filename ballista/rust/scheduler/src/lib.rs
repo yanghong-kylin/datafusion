@@ -103,7 +103,7 @@ use tonic::{Request, Response, Status};
 
 use self::state::{ConfigBackendClient, SchedulerState};
 use ballista_core::config::BallistaConfig;
-use ballista_core::execution_plans::ShuffleWriterExec;
+use ballista_core::execution_plans::{ShuffleStreamReaderExec, ShuffleWriterExec};
 use ballista_core::serde::scheduler::to_proto::hash_partitioning_to_proto;
 use datafusion::prelude::{ExecutionConfig, ExecutionContext};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -243,7 +243,8 @@ impl SchedulerGrpc for SchedulerServer {
                         .next_task_for_stage_scheduler(&metadata.id)
                         .await
                         .map_err(|e| {
-                            let msg = format!("Error finding next assignable task: {}", e);
+                            let msg =
+                                format!("Error finding next assignable task: {}", e);
                             error!("{}", msg);
                             tonic::Status::internal(msg)
                         })?,
@@ -252,7 +253,8 @@ impl SchedulerGrpc for SchedulerServer {
                         .next_task_for_aao_scheduler(&metadata.id)
                         .await
                         .map_err(|e| {
-                            let msg = format!("Error finding next assignable task: {}", e);
+                            let msg =
+                                format!("Error finding next assignable task: {}", e);
                             error!("{}", msg);
                             tonic::Status::internal(msg)
                         })?,
@@ -506,10 +508,30 @@ impl SchedulerGrpc for SchedulerServer {
 
                 // save stages into state
                 for shuffle_writer in stages {
-                    println!(
-                        "=== Shuffle Stage plan ===\n{}\n",
-                        displayable(shuffle_writer.children()[0].as_ref()).indent().to_string()
-                    );
+                    if push_based_shuffle {
+                        // save stage lineages
+                        let stream_shuffle_readers =
+                            ShuffleStreamReaderExec::find_stream_shuffle_readers(
+                                shuffle_writer.clone(),
+                            );
+                        for shuffle_reader in stream_shuffle_readers {
+                            fail_job!(state
+                                .save_stage_lineages(
+                                    &job_id_spawn,
+                                    shuffle_reader.stage_id,
+                                    shuffle_writer.stage_id(),
+                                )
+                                .await
+                                .map_err(|e| {
+                                    let msg = format!(
+                                        "Could save plan query stage lineages: {}",
+                                        e
+                                    );
+                                    error!("{}", msg);
+                                    tonic::Status::internal(msg)
+                                }));
+                        }
+                    }
 
                     fail_job!(state
                         .save_stage_plan(
@@ -584,11 +606,11 @@ mod test {
 
     use tonic::Request;
 
+    use crate::SchedulerPolicy;
     use ballista_core::error::BallistaError;
     use ballista_core::serde::protobuf::{
         executor_registration::OptionalHost, ExecutorRegistration, PollWorkParams,
     };
-    use crate::SchedulerPolicy;
 
     use super::{
         state::{SchedulerState, StandaloneClient},

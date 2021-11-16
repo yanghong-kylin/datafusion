@@ -127,7 +127,6 @@ impl DistributedPlanner {
 
                 if push_based_shuffle {
                     let shuffle_reader = Arc::new(ShuffleStreamReaderExec::new(
-                        job_id.to_string(),
                         shuffle_writer.stage_id(),
                         shuffle_writer.schema(),
                         1,
@@ -156,7 +155,7 @@ impl DistributedPlanner {
                 execution_plan.as_any().downcast_ref::<RepartitionExec>()
             {
                 match repart.output_partitioning() {
-                    Partitioning::Hash(_, part) => {
+                    Partitioning::Hash(_, _) => {
                         let shuffle_writer = if push_based_shuffle {
                             create_push_shuffle_writer(
                                 job_id,
@@ -175,7 +174,6 @@ impl DistributedPlanner {
 
                         if push_based_shuffle {
                             let shuffle_reader = Arc::new(ShuffleStreamReaderExec::new(
-                                job_id.to_string(),
                                 shuffle_writer.stage_id(),
                                 shuffle_writer.schema(),
                                 1, // TODD need to check the correctness
@@ -288,10 +286,6 @@ pub fn update_shuffle_locs(
 ) -> Result<Arc<dyn ExecutionPlan>> {
     if let Some(shuffle_writer) = stage.as_any().downcast_ref::<ShuffleWriterExec>() {
         if shuffle_writer.is_push_shuffle() {
-            assert_eq!(
-                output_locs.len(),
-                shuffle_writer.output_partitioning().partition_count()
-            );
             let new_shuffle_writer = Arc::new(ShuffleWriterExec::try_new_push_shuffle(
                 shuffle_writer.job_id().to_string(),
                 shuffle_writer.stage_id(),
