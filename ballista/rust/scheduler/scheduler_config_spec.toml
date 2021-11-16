@@ -36,7 +36,7 @@ abbr = "s"
 name = "scheduler_policy"
 type = "ballista_scheduler::SchedulerPolicy"
 doc = "The scheduing policy for the scheduler, see SchedulerPolicy::variants() for options. Default: Staged"
-default = "ballista_scheduler::SchedulerPolicy::Staged"
+default = "ballista_scheduler::SchedulerPolicy::AllAtOnce"
 
 [[param]]
 abbr = "n"

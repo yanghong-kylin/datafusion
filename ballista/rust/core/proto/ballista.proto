@@ -709,14 +709,14 @@ message ShuffleWriterExecNode {
   uint32 stage_id = 2;
   PhysicalPlanNode input = 3;
   PhysicalHashRepartition output_partitioning = 4;
-  repeated ExecutorMetadata execs = 5;
+  bool push_shuffle = 5;
+  repeated ExecutorMetadata execs = 6;
 }
 
 message ShuffleStreamReaderExecNode {
-  string job_id = 1;
-  uint32 stage_id = 2;
-  uint64 partition_count = 3;
-  Schema schema = 4;
+  uint32 stage_id = 1;
+  uint64 partition_count = 2;
+  Schema schema = 3;
 }
 
 message ShuffleReaderExecNode {

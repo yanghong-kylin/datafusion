@@ -68,9 +68,10 @@ impl Executor {
             plan.as_any().downcast_ref::<ShuffleWriterExec>()
         {
             // find all the stream shuffle readers and bind them to the context
-            let stream_shuffle_readers = find_stream_shuffle_readers(plan.clone())?;
+            let stream_shuffle_readers = ShuffleStreamReaderExec::find_stream_shuffle_readers(plan.clone());
             for shuffle_reader in stream_shuffle_readers {
-                let _job_id = shuffle_reader.job_id.clone();
+                let _job_id = job_id.clone();
+                // The stage_id in shuffle stream reader is the stage id which the reader depends on.
                 let _stage_id = shuffle_reader.stage_id;
                 {
                     let mut _map = self.channels.write().unwrap();
@@ -124,22 +125,3 @@ impl Executor {
     }
 }
 
-/// Returns the the streaming shuffle readers in the execution plan
-pub fn find_stream_shuffle_readers(
-    plan: Arc<dyn ExecutionPlan>,
-) -> Result<Vec<ShuffleStreamReaderExec>, BallistaError> {
-    if let Some(shuffle_reader) = plan.as_any().downcast_ref::<ShuffleStreamReaderExec>()
-    {
-        Ok(vec![shuffle_reader.clone()])
-    } else {
-        let readers = plan
-            .children()
-            .into_iter()
-            .map(|child| find_stream_shuffle_readers(child))
-            .collect::<Result<Vec<_>, BallistaError>>()?
-            .into_iter()
-            .flatten()
-            .collect();
-        Ok(readers)
-    }
-}

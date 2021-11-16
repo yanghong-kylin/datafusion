@@ -420,7 +420,7 @@ impl ShuffleWriterExec {
 
                     Some(Partitioning::Hash(exprs, n)) => {
                         let num_output_partitions = *n;
-                        assert!(execs.len() == num_output_partitions);
+                        assert_eq!(execs.len(), num_output_partitions);
 
                         let mut writers: Vec<BallistaClient> = vec![];
                         for i in 0..execs.len() {
