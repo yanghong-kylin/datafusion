@@ -189,7 +189,7 @@ impl FlightService for BallistaFlightService {
         let action =
             decode_protobuf(&descriptor.cmd).map_err(|e| from_ballista_err(&e))?;
 
-        let sender = match &action {
+        let (sender, channel_key) = match &action {
             BallistaAction::PushPartition {
                 job_id,
                 stage_id,
@@ -206,7 +206,7 @@ impl FlightService for BallistaFlightService {
                                     "No receive channels registered for this PushPartition job {:?}, stage {:?} ", job_id, stage_id)
                                 ));
                             } else {
-                                d[(*partition_id % d.len())].clone()
+                                (d[(*partition_id % d.len())].clone(), channel_key)
                             }
                         }
                         None => {
@@ -228,9 +228,13 @@ impl FlightService for BallistaFlightService {
             sender.send(record_batch).await.ok();
         }
 
+        {
+            let mut channels_map = self.executor.channels.write().unwrap();
+            channels_map.remove(&channel_key);
+        }
+
         Ok(Response::new(
-            Box::pin(EmptyPutStream{}
-            ) as Self::DoPutStream
+            Box::pin(EmptyPutStream {}) as Self::DoPutStream
         ))
     }
 
@@ -321,8 +325,7 @@ fn from_ballista_err(e: &ballista_core::error::BallistaError) -> Status {
     Status::internal(format!("Ballista Error: {:?}", e))
 }
 
-pub struct EmptyPutStream {
-}
+pub struct EmptyPutStream {}
 
 impl Stream for EmptyPutStream {
     type Item = Result<PutResult, tonic::Status>;

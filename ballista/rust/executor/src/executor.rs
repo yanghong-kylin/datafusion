@@ -38,7 +38,6 @@ pub struct Executor {
 
     /// Channels for sending partial shuffle partitions to stream shuffle reader.
     /// Key is the jobId + stageId.
-    /// TODO implement clean up logic
     pub channels: RwLock<HashMap<(String, usize), Vec<Sender<ArrowResult<RecordBatch>>>>>,
 }
 

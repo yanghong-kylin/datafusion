@@ -61,8 +61,8 @@ pub struct ShuffleStreamReaderExec {
     /// Partition count
     pub partition_count: usize,
 
-    /// Record Batch receiver
-    batch_receiver: Arc<Mutex<Vec<Receiver<ArrowResult<RecordBatch>>>>>,
+    /// Record Batch input receiver
+    batch_input: Arc<Mutex<Vec<Receiver<ArrowResult<RecordBatch>>>>>,
 
     /// Execution metrics
     metrics: ExecutionPlanMetricsSet,
@@ -75,7 +75,7 @@ impl ShuffleStreamReaderExec {
             stage_id,
             schema,
             partition_count,
-            batch_receiver: Arc::new(Mutex::new(Vec::new())),
+            batch_input: Arc::new(Mutex::new(Vec::new())),
             metrics: ExecutionPlanMetricsSet::new(),
         }
     }
@@ -85,7 +85,7 @@ impl ShuffleStreamReaderExec {
             Sender<ArrowResult<RecordBatch>>,
             Receiver<ArrowResult<RecordBatch>>,
         ) = channel(100);
-        self.batch_receiver.lock().unwrap().push(response_rx);
+        self.batch_input.lock().unwrap().push(response_rx);
         response_tx
     }
 
@@ -149,9 +149,9 @@ impl ExecutionPlan for ShuffleStreamReaderExec {
         ) = channel(2);
 
         let schema = &self.schema;
-        let mut rx = self.batch_receiver.lock().unwrap().pop().unwrap();
+        let mut rx = self.batch_input.lock().unwrap().pop().unwrap();
         let join_handle = task::spawn_blocking(move || {
-            if let Some(batch) = rx.blocking_recv() {
+            while let Some(batch) = rx.blocking_recv() {
                 sender.blocking_send(batch);
             }
         });
