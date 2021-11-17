@@ -80,7 +80,7 @@ impl FlightService for BallistaFlightService {
     type ListFlightsStream = BoxedFlightStream<FlightInfo>;
 
     async fn do_get(
-        &self,h
+        &self,
         request: Request<Ticket>,
     ) -> Result<Response<Self::DoGetStream>, Status> {
         let ticket = request.into_inner();
