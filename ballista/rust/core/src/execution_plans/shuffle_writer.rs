@@ -41,6 +41,7 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::compute::take;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion::arrow::error::Result as ArrowResult;
 use datafusion::arrow::ipc::reader::FileReader;
 use datafusion::arrow::ipc::writer::FileWriter;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -50,13 +51,17 @@ use datafusion::physical_plan::metrics::{
     self, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet,
 };
 use datafusion::physical_plan::repartition::RepartitionExec;
+use datafusion::physical_plan::stream::RecordBatchReceiverStream;
 use datafusion::physical_plan::Partitioning::RoundRobinBatch;
 use datafusion::physical_plan::{
     DisplayFormatType, ExecutionPlan, Metric, Partitioning, RecordBatchStream, Statistics,
 };
-use futures::StreamExt;
+use futures::{StreamExt, TryFutureExt};
 use hashbrown::HashMap;
 use log::{debug, info};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::task;
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 /// ShuffleWriterExec represents a section of a query plan that has consistent partitioning and
@@ -187,30 +192,37 @@ impl ShuffleWriterExec {
         }
     }
 
+    /// Is local push based shuffle
+    pub fn is_local_shuffle(&self, self_id: &str) -> bool {
+        match &self.output_loc {
+            OutputLocation::LocalDir(_) => false,
+            OutputLocation::Executors(execs) => execs.iter().all(|e| e.id.eq(self_id)),
+        }
+    }
+
     pub async fn execute_shuffle_write(
         &self,
         input_partition: usize,
+        local_senders: Option<Vec<Sender<ArrowResult<RecordBatch>>>>,
     ) -> Result<Vec<ShuffleWritePartition>> {
         let now = Instant::now();
 
         let mut stream = self.plan.execute(input_partition).await?;
+        let write_metrics = ShuffleWriteMetrics::new(input_partition, &self.metrics);
+        match &self.shuffle_output_partitioning {
+            None => {
+                let timer = write_metrics.write_time.timer();
+                let (stats, path) = match &self.output_loc {
+                    OutputLocation::LocalDir(work_dir) => {
+                        let mut path = PathBuf::from(work_dir);
+                        path.push(&self.job_id);
+                        path.push(&format!("{}", self.stage_id));
 
-        match &self.output_loc {
-            OutputLocation::LocalDir(work_dir) => {
-                let mut path = PathBuf::from(work_dir);
-                path.push(&self.job_id);
-                path.push(&format!("{}", self.stage_id));
-
-                let write_metrics =
-                    ShuffleWriteMetrics::new(input_partition, &self.metrics);
-                match &self.shuffle_output_partitioning {
-                    None => {
-                        let timer = write_metrics.write_time.timer();
                         path.push(&format!("{}", input_partition));
                         std::fs::create_dir_all(&path)?;
                         path.push("data.arrow");
                         let path = path.to_str().unwrap();
-                        info!("Writing results to {}", path);
+                        info!("Writing results to local path {}", path);
 
                         // stream results to disk
                         let stats = utils::write_stream_to_disk(
@@ -221,96 +233,163 @@ impl ShuffleWriterExec {
                         .await
                         .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
 
-                        write_metrics
-                            .input_rows
-                            .add(stats.num_rows.unwrap_or(0) as usize);
-                        write_metrics
-                            .output_rows
-                            .add(stats.num_rows.unwrap_or(0) as usize);
-                        timer.done();
-
-                        info!(
-                            "Executed partition {} in {} seconds. Statistics: {}",
-                            input_partition,
-                            now.elapsed().as_secs(),
-                            stats
-                        );
-
-                        Ok(vec![ShuffleWritePartition {
-                            partition_id: input_partition as u64,
-                            path: path.to_owned(),
-                            num_batches: stats.num_batches.unwrap_or(0),
-                            num_rows: stats.num_rows.unwrap_or(0),
-                            num_bytes: stats.num_bytes.unwrap_or(0),
-                        }])
+                        (stats, path.to_string())
                     }
 
-                    Some(Partitioning::Hash(exprs, n)) => {
-                        let num_output_partitions = *n;
+                    OutputLocation::Executors(execs) => {
+                        assert_eq!(execs.len(), 1);
+                        match local_senders {
+                            Some(senders) => {
+                                assert_eq!(senders.len(), 1);
+                                info!("Writing results to local sender.");
+                                let mut num_rows = 0;
+                                let mut num_batches = 0;
+                                let mut num_bytes = 0;
+                                while let Some(result) = stream.next().await {
+                                    let batch = result?;
+                                    let batch_size_bytes: usize = batch
+                                        .columns()
+                                        .iter()
+                                        .map(|array| array.get_array_memory_size())
+                                        .sum();
+                                    num_batches += 1;
+                                    num_rows += batch.num_rows();
+                                    num_bytes += batch_size_bytes;
+                                    senders[0].send(Ok(batch)).await.ok();
+                                }
 
-                        // we won't necessary produce output for every possible partition, so we
-                        // create writers on demand
-                        let mut writers: Vec<Option<ShuffleWriter>> = vec![];
-                        for _ in 0..num_output_partitions {
-                            writers.push(None);
-                        }
-
-                        let hashes_buf = &mut vec![];
-                        let random_state = ahash::RandomState::with_seeds(0, 0, 0, 0);
-
-                        while let Some(result) = stream.next().await {
-                            let input_batch = result?;
-
-                            write_metrics.input_rows.add(input_batch.num_rows());
-
-                            let arrays = exprs
-                                .iter()
-                                .map(|expr| {
-                                    Ok(expr
-                                        .evaluate(&input_batch)?
-                                        .into_array(input_batch.num_rows()))
-                                })
-                                .collect::<Result<Vec<_>>>()?;
-                            hashes_buf.clear();
-                            hashes_buf.resize(arrays[0].len(), 0);
-                            // Hash arrays and compute buckets based on number of partitions
-                            let hashes =
-                                create_hashes(&arrays, &random_state, hashes_buf)?;
-                            let mut indices = vec![vec![]; num_output_partitions];
-                            for (index, hash) in hashes.iter().enumerate() {
-                                indices[(*hash % num_output_partitions as u64) as usize]
-                                    .push(index as u64)
+                                let stats = PartitionStats::new(
+                                    Some(num_rows as u64),
+                                    Some(num_batches),
+                                    Some(num_bytes as u64),
+                                );
+                                (stats, String::from(""))
                             }
-                            for (output_partition, partition_indices) in
-                                indices.into_iter().enumerate()
-                            {
-                                let indices = partition_indices.into();
+                            None => {
+                                let executor = execs[0].to_owned();
+                                info!(
+                                    "Writing results to host {}, port {}",
+                                    executor.host.as_str(),
+                                    executor.port
+                                );
 
-                                // Produce batches based on indices
-                                let columns = input_batch
-                                    .columns()
-                                    .iter()
-                                    .map(|c| {
-                                        take(c.as_ref(), &indices, None).map_err(|e| {
-                                            DataFusionError::Execution(e.to_string())
-                                        })
-                                    })
-                                    .collect::<Result<Vec<Arc<dyn Array>>>>()?;
+                                // stream results to network
+                                let stats = utils::write_stream_to_flight(
+                                    stream,
+                                    executor.host.as_str(),
+                                    executor.port,
+                                    self.job_id.clone(),
+                                    self.stage_id,
+                                    0,
+                                    &write_metrics.write_time,
+                                )
+                                .await
+                                .map_err(|e| {
+                                    DataFusionError::Execution(format!("{:?}", e))
+                                })?;
+                                (stats, String::from(""))
+                            }
+                        }
+                    }
+                };
 
-                                let output_batch =
-                                    RecordBatch::try_new(input_batch.schema(), columns)?;
+                write_metrics
+                    .input_rows
+                    .add(stats.num_rows.unwrap_or(0) as usize);
+                write_metrics
+                    .output_rows
+                    .add(stats.num_rows.unwrap_or(0) as usize);
+                timer.done();
 
-                                // write non-empty batch out
+                info!(
+                    "Executed partition {} in {} seconds. Statistics: {}",
+                    input_partition,
+                    now.elapsed().as_secs(),
+                    stats
+                );
 
-                                //TODO optimize so we don't write or fetch empty partitions
-                                //if output_batch.num_rows() > 0 {
-                                let timer = write_metrics.write_time.timer();
-                                match &mut writers[output_partition] {
-                                    Some(w) => {
-                                        w.write(&output_batch)?;
-                                    }
-                                    None => {
-                                        let mut path = path.clone();
+                Ok(vec![ShuffleWritePartition {
+                    partition_id: input_partition as u64,
+                    path: path.to_owned(),
+                    num_batches: stats.num_batches.unwrap_or(0),
+                    num_rows: stats.num_rows.unwrap_or(0),
+                    num_bytes: stats.num_bytes.unwrap_or(0),
+                }])
+            }
+
+            Some(Partitioning::Hash(exprs, n)) => {
+                let num_output_partitions = *n;
+
+                // we won't necessary produce output for every possible partition, so we
+                // create writers on demand
+                let mut writers: Vec<Option<ShuffleWriter>> = vec![];
+                for _ in 0..num_output_partitions {
+                    writers.push(None);
+                }
+
+                let hashes_buf = &mut vec![];
+                let random_state = ahash::RandomState::with_seeds(0, 0, 0, 0);
+
+                while let Some(result) = stream.next().await {
+                    let input_batch = result?;
+
+                    write_metrics.input_rows.add(input_batch.num_rows());
+
+                    let arrays = exprs
+                        .iter()
+                        .map(|expr| {
+                            Ok(expr
+                                .evaluate(&input_batch)?
+                                .into_array(input_batch.num_rows()))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    hashes_buf.clear();
+                    hashes_buf.resize(arrays[0].len(), 0);
+                    // Hash arrays and compute buckets based on number of partitions
+                    let hashes = create_hashes(&arrays, &random_state, hashes_buf)?;
+                    let mut indices = vec![vec![]; num_output_partitions];
+                    for (index, hash) in hashes.iter().enumerate() {
+                        indices[(*hash % num_output_partitions as u64) as usize]
+                            .push(index as u64)
+                    }
+                    for (output_partition, partition_indices) in
+                        indices.into_iter().enumerate()
+                    {
+                        let indices = partition_indices.into();
+
+                        // Produce batches based on indices
+                        let columns = input_batch
+                            .columns()
+                            .iter()
+                            .map(|c| {
+                                take(c.as_ref(), &indices, None).map_err(|e| {
+                                    DataFusionError::Execution(e.to_string())
+                                })
+                            })
+                            .collect::<Result<Vec<Arc<dyn Array>>>>()?;
+
+                        let output_batch =
+                            RecordBatch::try_new(input_batch.schema(), columns)?;
+
+                        let num_rows = output_batch.num_rows();
+
+                        // write non-empty batch out
+
+                        //TODO optimize so we don't write or fetch empty partitions
+                        //if output_batch.num_rows() > 0 {
+                        let timer = write_metrics.write_time.timer();
+                        match &mut writers[output_partition] {
+                            Some(w) => {
+                                w.write(output_batch).await?;
+                            }
+                            None => {
+                                // create proper shuffle writer
+                                match &self.output_loc {
+                                    OutputLocation::LocalDir(work_dir) => {
+                                        let mut path = PathBuf::from(work_dir);
+                                        path.push(&self.job_id);
+                                        path.push(&format!("{}", self.stage_id));
+
                                         path.push(&format!("{}", output_partition));
                                         std::fs::create_dir_all(&path)?;
 
@@ -321,208 +400,88 @@ impl ShuffleWriterExec {
                                         let path = path.to_str().unwrap();
                                         info!("Writing results to {}", path);
 
-                                        let mut writer = ShuffleWriter::new(
+                                        let mut writer = FileShuffleWriter::new(
                                             path,
                                             stream.schema().as_ref(),
                                         )?;
-
-                                        writer.write(&output_batch)?;
-                                        writers[output_partition] = Some(writer);
+                                        writer.write(output_batch)?;
+                                        writers[output_partition] =
+                                            Some(ShuffleWriter::File(writer));
+                                    }
+                                    OutputLocation::Executors(execs) => {
+                                        assert_eq!(execs.len(), num_output_partitions);
+                                        match &local_senders {
+                                            Some(senders) => {
+                                                assert_eq!(
+                                                    senders.len(),
+                                                    num_output_partitions
+                                                );
+                                                info!("Writing results to local sender.");
+                                                let sender =
+                                                    (&senders[output_partition]).clone();
+                                                let mut writer =
+                                                    LocalShuffleWriter::new(sender)?;
+                                                writer.write(output_batch).await?;
+                                                writers[output_partition] =
+                                                    Some(ShuffleWriter::Local(writer));
+                                            }
+                                            None => {
+                                                let exec = &execs[output_partition];
+                                                let mut writer =
+                                                    FlightShuffleWriter::new(
+                                                        exec.host.clone(),
+                                                        exec.port,
+                                                        self.job_id.clone(),
+                                                        self.stage_id,
+                                                        output_partition,
+                                                        &stream.schema(),
+                                                    )?;
+                                                writer.write(output_batch).await?;
+                                                writers[output_partition] =
+                                                    Some(ShuffleWriter::Flight(writer));
+                                            }
+                                        }
                                     }
                                 }
-                                write_metrics.output_rows.add(output_batch.num_rows());
-                                timer.done();
                             }
                         }
-
-                        let mut part_locs = vec![];
-
-                        for (i, w) in writers.iter_mut().enumerate() {
-                            match w {
-                                Some(w) => {
-                                    w.finish()?;
-                                    info!(
-                                "Finished writing shuffle partition {} at {}. Batches: {}. Rows: {}. Bytes: {}.",
-                                i,
-                                w.path(),
-                                w.num_batches,
-                                w.num_rows,
-                                w.num_bytes
-                            );
-
-                                    part_locs.push(ShuffleWritePartition {
-                                        partition_id: i as u64,
-                                        path: w.path().to_owned(),
-                                        num_batches: w.num_batches,
-                                        num_rows: w.num_rows,
-                                        num_bytes: w.num_bytes,
-                                    });
-                                }
-                                None => {}
-                            }
-                        }
-                        Ok(part_locs)
-                    }
-
-                    _ => Err(DataFusionError::Execution(
-                        "Invalid shuffle partitioning scheme".to_owned(),
-                    )),
-                }
-            }
-            OutputLocation::Executors(execs) => {
-                let write_metrics =
-                    ShuffleWriteMetrics::new(input_partition, &self.metrics);
-                match &self.shuffle_output_partitioning {
-                    None => {
-                        assert!(execs.len() == 1);
-
-                        let executor = execs[0].to_owned();
-                        let timer = write_metrics.write_time.timer();
-                        info!(
-                            "Writing results to host {}, port {}",
-                            executor.host.as_str(),
-                            executor.port
-                        );
-                        // stream results to network
-
-                        let mut ballista_client = BallistaClient::try_new(
-                            executor.host.as_str(),
-                            executor.port,
-                        )
-                        .await
-                        .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
-
-                        ballista_client
-                            .push_partition(self.job_id.clone(), self.stage_id, 0, stream)
-                            .await
-                            .map_err(|e| {
-                                DataFusionError::Execution(format!("{:?}", e))
-                            })?;
-
-                        write_metrics.input_rows.add(0 as usize);
-                        write_metrics.output_rows.add(0 as usize);
+                        write_metrics.output_rows.add(num_rows);
                         timer.done();
-
-                        info!(
-                            "Executed partition {} in {} seconds.",
-                            input_partition,
-                            now.elapsed().as_secs()
-                        );
-
-                        Ok(vec![ShuffleWritePartition {
-                            partition_id: input_partition as u64,
-                            path: "".to_owned(),
-                            num_batches: 0,
-                            num_rows: 0,
-                            num_bytes: 0,
-                        }])
                     }
+                }
 
-                    Some(Partitioning::Hash(exprs, n)) => {
-                        let num_output_partitions = *n;
-                        assert_eq!(execs.len(), num_output_partitions);
+                let mut part_locs = vec![];
 
-                        let mut writers: Vec<BallistaClient> = vec![];
-                        for i in 0..execs.len() {
-                            let exec = &execs[i];
-                            writers.push(
-                                BallistaClient::try_new(exec.host.as_str(), exec.port)
-                                    .await
-                                    .map_err(|e| {
-                                        DataFusionError::Execution(format!("{:?}", e))
-                                    })?,
-                            );
-                        }
+                for (i, w) in writers.iter_mut().enumerate() {
+                    match w {
+                        Some(w) => {
+                            w.finish()?;
+                            info!(
+                                    "Finished writing shuffle partition {} at {}. Batches: {}. Rows: {}. Bytes: {}.",
+                                    i,
+                                    w.path(),
+                                    w.num_batches(),
+                                    w.num_rows(),
+                                    w.num_bytes()
+                                );
 
-                        let hashes_buf = &mut vec![];
-                        let random_state = ahash::RandomState::with_seeds(0, 0, 0, 0);
-
-                        while let Some(result) = stream.next().await {
-                            let input_batch = result?;
-
-                            write_metrics.input_rows.add(input_batch.num_rows());
-
-                            let arrays = exprs
-                                .iter()
-                                .map(|expr| {
-                                    Ok(expr
-                                        .evaluate(&input_batch)?
-                                        .into_array(input_batch.num_rows()))
-                                })
-                                .collect::<Result<Vec<_>>>()?;
-                            hashes_buf.clear();
-                            hashes_buf.resize(arrays[0].len(), 0);
-                            // Hash arrays and compute buckets based on number of partitions
-                            let hashes =
-                                create_hashes(&arrays, &random_state, hashes_buf)?;
-                            let mut indices = vec![vec![]; num_output_partitions];
-                            for (index, hash) in hashes.iter().enumerate() {
-                                indices[(*hash % num_output_partitions as u64) as usize]
-                                    .push(index as u64)
-                            }
-                            for (output_partition, partition_indices) in
-                                indices.into_iter().enumerate()
-                            {
-                                let indices = partition_indices.into();
-
-                                // Produce batches based on indices
-                                let columns = input_batch
-                                    .columns()
-                                    .iter()
-                                    .map(|c| {
-                                        take(c.as_ref(), &indices, None).map_err(|e| {
-                                            DataFusionError::Execution(e.to_string())
-                                        })
-                                    })
-                                    .collect::<Result<Vec<Arc<dyn Array>>>>()?;
-
-                                let output_batch =
-                                    RecordBatch::try_new(input_batch.schema(), columns)?;
-
-                                //TODO optimize so we don't write or fetch empty partitions
-                                let timer = write_metrics.write_time.timer();
-                                let num_rows = output_batch.num_rows();
-                                let schema = output_batch.schema();
-                                &mut writers[output_partition]
-                                    .push_partition(
-                                        self.job_id.clone(),
-                                        self.stage_id,
-                                        output_partition,
-                                        Box::pin(MemoryStream::try_new(
-                                            vec![output_batch],
-                                            schema,
-                                            None,
-                                        )?),
-                                    )
-                                    .await
-                                    .map_err(|e| {
-                                        DataFusionError::Execution(format!("{:?}", e))
-                                    })?;
-
-                                write_metrics.output_rows.add(num_rows);
-                                timer.done();
-                            }
-                        }
-
-                        let mut part_locs = vec![];
-                        for (i, _) in writers.iter_mut().enumerate() {
-                            // TODO implement method to finish the push
                             part_locs.push(ShuffleWritePartition {
                                 partition_id: i as u64,
-                                path: "".to_owned(),
-                                num_batches: 0,
-                                num_rows: 0,
-                                num_bytes: 0,
+                                path: w.path().to_owned(),
+                                num_batches: w.num_batches(),
+                                num_rows: w.num_rows(),
+                                num_bytes: w.num_bytes(),
                             });
                         }
-                        Ok(part_locs)
+                        None => {}
                     }
-
-                    _ => Err(DataFusionError::Execution(
-                        "Invalid shuffle partitioning scheme".to_owned(),
-                    )),
                 }
+                Ok(part_locs)
             }
+
+            _ => Err(DataFusionError::Execution(
+                "Invalid shuffle partitioning scheme".to_owned(),
+            )),
         }
     }
 }
@@ -567,7 +526,7 @@ impl ExecutionPlan for ShuffleWriterExec {
         &self,
         input_partition: usize,
     ) -> Result<Pin<Box<dyn RecordBatchStream + Send + Sync>>> {
-        let part_loc = self.execute_shuffle_write(input_partition).await?;
+        let part_loc = self.execute_shuffle_write(input_partition, None).await?;
 
         // build metadata result batch
         let num_writers = part_loc.len();
@@ -648,7 +607,64 @@ fn result_schema() -> SchemaRef {
     ]))
 }
 
-struct ShuffleWriter {
+/// Different Shuffle writers
+enum ShuffleWriter {
+    File(FileShuffleWriter),
+    Flight(FlightShuffleWriter),
+    Local(LocalShuffleWriter),
+}
+
+impl ShuffleWriter {
+    async fn write(&mut self, batch: RecordBatch) -> Result<()> {
+        match self {
+            ShuffleWriter::File(writer) => writer.write(batch),
+            ShuffleWriter::Flight(writer) => writer.write(batch).await,
+            ShuffleWriter::Local(writer) => writer.write(batch).await,
+        }
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        match self {
+            ShuffleWriter::File(writer) => writer.finish(),
+            ShuffleWriter::Flight(writer) => writer.finish(),
+            ShuffleWriter::Local(writer) => writer.finish(),
+        }
+    }
+
+    fn path(&self) -> &str {
+        match self {
+            ShuffleWriter::File(writer) => writer.path(),
+            ShuffleWriter::Flight(writer) => writer.path(),
+            ShuffleWriter::Local(writer) => writer.path(),
+        }
+    }
+
+    pub fn num_batches(&self) -> u64 {
+        match self {
+            ShuffleWriter::File(writer) => writer.num_batches(),
+            ShuffleWriter::Flight(writer) => writer.num_batches(),
+            ShuffleWriter::Local(writer) => writer.num_batches(),
+        }
+    }
+
+    pub fn num_rows(&self) -> u64 {
+        match self {
+            ShuffleWriter::File(writer) => writer.num_rows(),
+            ShuffleWriter::Flight(writer) => writer.num_rows(),
+            ShuffleWriter::Local(writer) => writer.num_rows(),
+        }
+    }
+
+    pub fn num_bytes(&self) -> u64 {
+        match self {
+            ShuffleWriter::File(writer) => writer.num_bytes(),
+            ShuffleWriter::Flight(writer) => writer.num_bytes(),
+            ShuffleWriter::Local(writer) => writer.num_bytes(),
+        }
+    }
+}
+
+struct FileShuffleWriter {
     path: String,
     writer: FileWriter<File>,
     num_batches: u64,
@@ -656,7 +672,7 @@ struct ShuffleWriter {
     num_bytes: u64,
 }
 
-impl ShuffleWriter {
+impl FileShuffleWriter {
     fn new(path: &str, schema: &Schema) -> Result<Self> {
         let file = File::create(path)
             .map_err(|e| {
@@ -675,8 +691,8 @@ impl ShuffleWriter {
         })
     }
 
-    fn write(&mut self, batch: &RecordBatch) -> Result<()> {
-        self.writer.write(batch)?;
+    fn write(&mut self, batch: RecordBatch) -> Result<()> {
+        self.writer.write(&batch)?;
         self.num_batches += 1;
         self.num_rows += batch.num_rows() as u64;
         let num_bytes: usize = batch
@@ -694,6 +710,148 @@ impl ShuffleWriter {
 
     fn path(&self) -> &str {
         &self.path
+    }
+
+    pub fn num_batches(&self) -> u64 {
+        self.num_batches
+    }
+
+    pub fn num_rows(&self) -> u64 {
+        self.num_rows
+    }
+
+    pub fn num_bytes(&self) -> u64 {
+        self.num_bytes
+    }
+}
+
+struct FlightShuffleWriter {
+    num_batches: u64,
+    num_rows: u64,
+    num_bytes: u64,
+    sender: Sender<ArrowResult<RecordBatch>>,
+}
+
+impl FlightShuffleWriter {
+    fn new(
+        host: String,
+        port: u16,
+        job_id: String,
+        stage_id: usize,
+        partition_id: usize,
+        schema: &SchemaRef,
+    ) -> Result<Self> {
+        let (sender, receiver): (
+            Sender<ArrowResult<RecordBatch>>,
+            Receiver<ArrowResult<RecordBatch>>,
+        ) = channel(2);
+
+        let stream = RecordBatchReceiverStream::create(schema, receiver, None);
+
+        tokio::task::spawn(async move {
+            let mut client = BallistaClient::try_new(host.as_str(), port)
+                .await
+                .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
+
+            let stat = client
+                .push_partition(job_id, stage_id, partition_id, stream)
+                .await
+                .map_err(|e| DataFusionError::Execution(format!("{:?}", e)));
+            stat
+        });
+
+        Ok(Self {
+            num_batches: 0,
+            num_rows: 0,
+            num_bytes: 0,
+            sender,
+        })
+    }
+
+    async fn write(&mut self, batch: RecordBatch) -> Result<()> {
+        let num_rows = batch.num_rows();
+        let num_bytes: usize = batch
+            .columns()
+            .iter()
+            .map(|array| array.get_array_memory_size())
+            .sum();
+        self.sender.send(ArrowResult::Ok(batch)).await.ok();
+        self.num_batches += 1;
+        self.num_rows += num_rows as u64;
+        self.num_bytes += num_bytes as u64;
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    fn path(&self) -> &str {
+        ""
+    }
+
+    fn num_batches(&self) -> u64 {
+        self.num_batches
+    }
+
+    fn num_rows(&self) -> u64 {
+        self.num_rows
+    }
+
+    fn num_bytes(&self) -> u64 {
+        self.num_bytes
+    }
+}
+
+struct LocalShuffleWriter {
+    num_batches: u64,
+    num_rows: u64,
+    num_bytes: u64,
+    sender: Sender<ArrowResult<RecordBatch>>,
+}
+
+impl LocalShuffleWriter {
+    fn new(sender: Sender<ArrowResult<RecordBatch>>) -> Result<Self> {
+        Ok(Self {
+            num_batches: 0,
+            num_rows: 0,
+            num_bytes: 0,
+            sender,
+        })
+    }
+
+    async fn write(&mut self, batch: RecordBatch) -> Result<()> {
+        let num_rows = batch.num_rows();
+        let num_bytes: usize = batch
+            .columns()
+            .iter()
+            .map(|array| array.get_array_memory_size())
+            .sum();
+        self.sender.send(ArrowResult::Ok(batch)).await.ok();
+        self.num_batches += 1;
+        self.num_rows += num_rows as u64;
+        self.num_bytes += num_bytes as u64;
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    fn path(&self) -> &str {
+        ""
+    }
+
+    fn num_batches(&self) -> u64 {
+        self.num_batches
+    }
+
+    fn num_rows(&self) -> u64 {
+        self.num_rows
+    }
+
+    fn num_bytes(&self) -> u64 {
+        self.num_bytes
     }
 }
 

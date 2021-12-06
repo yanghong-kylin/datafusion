@@ -17,7 +17,8 @@
 
 //! Client API for sending requests to executors.
 
-use std::sync::Arc;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::{collections::HashMap, pin::Pin};
 use std::{
     convert::{TryFrom, TryInto},
@@ -101,12 +102,13 @@ impl BallistaClient {
         stage_id: usize,
         partition_id: usize,
         input: SendableRecordBatchStream,
-    ) -> Result<()> {
+    ) -> Result<PartitionStats> {
         let action = Action::PushPartition {
             job_id: job_id.to_string(),
             stage_id,
             partition_id,
         };
+
         let serialized_action: protobuf::Action = action.try_into()?;
         let mut cmd: Vec<u8> = Vec::with_capacity(serialized_action.encoded_len());
         serialized_action
@@ -124,15 +126,25 @@ impl BallistaClient {
             ..schema_flight_data
         };
 
-        let flight_stream = RecordBatchToFlightDataStream::new(input, cmd_data, options);
+        let flight_stream = Arc::new(Mutex::new(RecordBatchToFlightDataStream::new(
+            input, cmd_data, options,
+        )));
+        let flight_stream_ref = RecordBatchToFlightDataStreamRef {
+            batch_to_stream: flight_stream.clone(),
+        };
 
         self.flight_client
-            .do_put(flight_stream)
+            .do_put(flight_stream_ref)
             .await
             .map_err(|e| BallistaError::General(format!("{:?}", e)))?
             .into_inner();
 
-        Ok(())
+        let metrics = flight_stream.lock().unwrap();
+        Ok(PartitionStats::new(
+            Some(metrics.num_rows),
+            Some(metrics.num_batches),
+            Some(metrics.num_bytes),
+        ))
     }
 
     /// Execute an action and retrieve the results
@@ -219,7 +231,14 @@ impl RecordBatchStream for FlightDataStream {
     }
 }
 
+struct RecordBatchToFlightDataStreamRef {
+    batch_to_stream: Arc<Mutex<RecordBatchToFlightDataStream>>,
+}
+
 struct RecordBatchToFlightDataStream {
+    num_batches: u64,
+    num_rows: u64,
+    num_bytes: u64,
     batch: SendableRecordBatchStream,
     buffered_data: Vec<FlightData>,
     options: IpcWriteOptions,
@@ -232,6 +251,9 @@ impl RecordBatchToFlightDataStream {
         options: IpcWriteOptions,
     ) -> Self {
         Self {
+            num_batches: 0,
+            num_rows: 0,
+            num_bytes: 0,
             batch,
             buffered_data: vec![schema],
             options,
@@ -239,14 +261,14 @@ impl RecordBatchToFlightDataStream {
     }
 }
 
-impl Stream for RecordBatchToFlightDataStream {
+impl Stream for RecordBatchToFlightDataStreamRef {
     type Item = FlightData;
 
     fn poll_next(
         self: std::pin::Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        let self_mut = self.get_mut();
+        let mut self_mut = self.get_mut().batch_to_stream.lock().unwrap();
         if let Some(event) = self_mut.buffered_data.pop() {
             Poll::Ready(Some(event))
         } else {
@@ -257,6 +279,14 @@ impl Stream for RecordBatchToFlightDataStream {
                         continue;
                     }
                     Poll::Ready(Some(Ok(record_batch))) => {
+                        self_mut.num_batches += 1;
+                        self_mut.num_rows += record_batch.num_rows() as u64;
+                        let num_bytes: usize = record_batch
+                            .columns()
+                            .iter()
+                            .map(|array| array.get_array_memory_size())
+                            .sum();
+                        self_mut.num_bytes += num_bytes as u64;
                         let converted_chunk =
                             arrow_flight::utils::flight_data_from_arrow_batch(
                                 &record_batch,

@@ -189,7 +189,7 @@ impl FlightService for BallistaFlightService {
         let action =
             decode_protobuf(&descriptor.cmd).map_err(|e| from_ballista_err(&e))?;
 
-        let (sender, channel_key) = match &action {
+        let (sender, channel_key) = match action {
             BallistaAction::PushPartition {
                 job_id,
                 stage_id,
@@ -198,20 +198,20 @@ impl FlightService for BallistaFlightService {
                 info!("Trying to read PushPartition job {:?}, stage {:?} and partition {:?}", job_id, stage_id, partition_id);
                 {
                     let channels_map = self.executor.channels.read().unwrap();
-                    let channel_key = (job_id.to_string(), stage_id.clone());
+                    let channel_key = (job_id, stage_id);
                     match channels_map.get(&channel_key) {
                         Some(d) => {
                             if d.is_empty() {
                                 return Err(Status::invalid_argument(format!(
-                                    "No receive channels registered for this PushPartition job {:?}, stage {:?} ", job_id, stage_id)
+                                    "No receive channels registered for this PushPartition job {:?}, stage {:?} ", &channel_key.0, &channel_key.1)
                                 ));
                             } else {
-                                (d[(*partition_id % d.len())].clone(), channel_key)
+                                (d[(partition_id % d.len())].clone(), channel_key)
                             }
                         }
                         None => {
                             return Err(Status::invalid_argument(format!(
-                                "No receive channels registered for this PushPartition job {:?}, stage {:?} ", job_id, stage_id)
+                                "No receive channels registered for this PushPartition job {:?}, stage {:?} ", &channel_key.0, &channel_key.1)
                             ));
                         }
                     }

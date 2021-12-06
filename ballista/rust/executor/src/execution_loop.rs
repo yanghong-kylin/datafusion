@@ -124,6 +124,7 @@ async fn run_received_tasks(
     tokio::spawn(async move {
         let execution_result = executor
             .execute_shuffle_write(
+                executor_id.clone(),
                 task_id.job_id.clone(),
                 task_id.stage_id as usize,
                 task_id.partition_id as usize,

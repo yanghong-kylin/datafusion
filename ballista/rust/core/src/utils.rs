@@ -29,6 +29,7 @@ use crate::execution_plans::{
 use crate::memory_stream::MemoryStream;
 use crate::serde::scheduler::PartitionStats;
 
+use crate::client::BallistaClient;
 use crate::config::BallistaConfig;
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::Schema;
@@ -112,47 +113,27 @@ pub async fn write_stream_to_disk(
 }
 
 /// Stream data to executor in Arrow IPC format
-pub async fn write_stream_to_host(
-    stream: &mut Pin<Box<dyn RecordBatchStream + Send + Sync>>,
-    path: &str,
-    disk_write_metric: &metrics::Time,
+// "Unnecessary" lifetime syntax due to https://github.com/rust-lang/rust/issues/63033
+pub async fn write_stream_to_flight<'a>(
+    stream: Pin<Box<dyn RecordBatchStream + Send + Sync>>,
+    host: &'a str,
+    port: u16,
+    job_id: String,
+    stage_id: usize,
+    partition_id: usize,
+    flight_write_metric: &'a metrics::Time,
 ) -> Result<PartitionStats> {
-    let file = File::create(&path).map_err(|e| {
-        BallistaError::General(format!(
-            "Failed to create partition file at {}: {:?}",
-            path, e
-        ))
-    })?;
+    let timer = flight_write_metric.timer();
+    let mut client = BallistaClient::try_new(host, port)
+        .await
+        .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
+    let stats = client
+        .push_partition(job_id, stage_id, partition_id, stream)
+        .await
+        .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
 
-    let mut num_rows = 0;
-    let mut num_batches = 0;
-    let mut num_bytes = 0;
-    let mut writer = FileWriter::try_new(file, stream.schema().as_ref())?;
-
-    while let Some(result) = stream.next().await {
-        let batch = result?;
-
-        let batch_size_bytes: usize = batch
-            .columns()
-            .iter()
-            .map(|array| array.get_array_memory_size())
-            .sum();
-        num_batches += 1;
-        num_rows += batch.num_rows();
-        num_bytes += batch_size_bytes;
-
-        let timer = disk_write_metric.timer();
-        writer.write(&batch)?;
-        timer.done();
-    }
-    let timer = disk_write_metric.timer();
-    writer.finish()?;
     timer.done();
-    Ok(PartitionStats::new(
-        Some(num_rows as u64),
-        Some(num_batches),
-        Some(num_bytes as u64),
-    ))
+    Ok(stats)
 }
 
 pub async fn collect_stream(

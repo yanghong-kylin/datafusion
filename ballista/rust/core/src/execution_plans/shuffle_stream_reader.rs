@@ -152,19 +152,23 @@ impl ExecutionPlan for ShuffleStreamReaderExec {
         let mut rx = self.batch_input.lock().unwrap().pop().unwrap();
         let join_handle = task::spawn_blocking(move || {
             while let Some(batch) = rx.blocking_recv() {
-                sender.blocking_send(batch);
+                sender.blocking_send(batch).ok();
             }
         });
         Ok(RecordBatchReceiverStream::create(
             schema,
             receiver,
-            join_handle,
+            Some(join_handle),
         ))
 
         // let schema = &self.schema;
         // let rx = self.batch_receiver.lock().unwrap().pop().unwrap();
         // let join_handle = tokio::task::spawn(async move {});
         // Ok(RecordBatchReceiverStream::create(schema, rx, join_handle))
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.clone_inner())
     }
 
     fn fmt_as(
@@ -177,10 +181,6 @@ impl ExecutionPlan for ShuffleStreamReaderExec {
                 write!(f, "ShuffleStreamReaderExec:")
             }
         }
-    }
-
-    fn metrics(&self) -> Option<MetricsSet> {
-        Some(self.metrics.clone_inner())
     }
 
     fn statistics(&self) -> Statistics {

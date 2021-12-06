@@ -57,6 +57,7 @@ impl Executor {
     /// and statistics.
     pub async fn execute_shuffle_write(
         &self,
+        executor_id: String,
         job_id: String,
         stage_id: usize,
         part: usize,
@@ -66,8 +67,9 @@ impl Executor {
         let exec = if let Some(shuffle_writer) =
             plan.as_any().downcast_ref::<ShuffleWriterExec>()
         {
-            // find all the stream shuffle readers and bind them to the context
-            let stream_shuffle_readers = ShuffleStreamReaderExec::find_stream_shuffle_readers(plan.clone());
+            // find all the stream shuffle readers and bind them to the executor context
+            let stream_shuffle_readers =
+                ShuffleStreamReaderExec::find_stream_shuffle_readers(plan.clone());
             for shuffle_reader in stream_shuffle_readers {
                 let _job_id = job_id.clone();
                 // The stage_id in shuffle stream reader is the stage id which the reader depends on.
@@ -104,7 +106,18 @@ impl Executor {
             ))
         }?;
 
-        let partitions = exec.execute_shuffle_write(part).await?;
+        let partitions = if exec.is_local_shuffle(executor_id.as_str()) {
+            // If we reach here, the tasks run the stream shuffle reader should already been scheduled
+            // and bound to the executor context.
+            let channel_key = &(job_id.clone(), stage_id);
+            let local_senders = self.get_local_senders(channel_key);
+            let par = exec.execute_shuffle_write(part, local_senders).await?;
+            let mut channels_map = self.channels.write().unwrap();
+            channels_map.remove(&channel_key);
+            par
+        } else {
+            exec.execute_shuffle_write(part, None).await?
+        };
 
         println!(
             "=== [{}/{}/{}] Physical plan with metrics ===\n{}\n",
@@ -119,8 +132,15 @@ impl Executor {
         Ok(partitions)
     }
 
+    fn get_local_senders(
+        &self,
+        channel_key: &(String, usize),
+    ) -> Option<Vec<Sender<ArrowResult<RecordBatch>>>> {
+        let channels_map = self.channels.read().unwrap();
+        channels_map.get(channel_key).cloned()
+    }
+
     pub fn work_dir(&self) -> &str {
         &self.work_dir
     }
 }
-

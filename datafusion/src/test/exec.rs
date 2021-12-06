@@ -193,7 +193,7 @@ impl ExecutionPlan for MockExec {
         Ok(RecordBatchReceiverStream::create(
             &self.schema,
             rx,
-            join_handle,
+            Some(join_handle),
         ))
     }
 
@@ -316,7 +316,7 @@ impl ExecutionPlan for BarrierExec {
         Ok(RecordBatchReceiverStream::create(
             &self.schema,
             rx,
-            join_handle,
+            Some(join_handle),
         ))
     }
 
