@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use crate::error::BallistaError;
 use crate::execution_plans::{
-    ShuffleStreamReaderExec, ShuffleReaderExec, ShuffleWriterExec, UnresolvedShuffleExec,
+    ShuffleReaderExec, ShuffleStreamReaderExec, ShuffleWriterExec, UnresolvedShuffleExec,
 };
 use crate::serde::protobuf::repartition_exec_node::PartitionMethod;
 use crate::serde::protobuf::ShuffleReaderPartition;
@@ -366,6 +366,7 @@ impl TryInto<Arc<dyn ExecutionPlan>> for &protobuf::PhysicalPlanNode {
                     on,
                     &join_type.into(),
                     partition_mode,
+                    &hashjoin.null_equals_null,
                 )?))
             }
             PhysicalPlanType::CrossJoin(crossjoin) => {

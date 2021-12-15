@@ -36,7 +36,7 @@ pub async fn new_standalone_scheduler() -> Result<SocketAddr> {
         Arc::new(client),
         "ballista".to_string(),
         IpAddr::V4(Ipv4Addr::LOCALHOST),
-        SchedulerPolicy::Staged
+        SchedulerPolicy::Staged,
     ));
     // Let the OS assign a random, free port
     let listener = TcpListener::bind("localhost:0").await?;

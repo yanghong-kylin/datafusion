@@ -93,6 +93,7 @@ pub(super) struct SchedulerState {
     namespace: String,
     // Only used by push based shuffle now, mapping from shuffle writer stage to shuffle reader stage
     // TODO implement clean up logic
+    #[allow(dead_code)]
     stage_lineages: Arc<RwLock<HashMap<usize, usize>>>,
 }
 
@@ -506,6 +507,7 @@ impl SchedulerState {
         Ok(None)
     }
 
+    #[allow(dead_code)]
     pub fn save_stage_lineages_sync(
         &self,
         stage_id: usize,
@@ -516,6 +518,7 @@ impl SchedulerState {
     }
 
     // TODO WTFK, why this doesn't work ???
+    #[allow(dead_code)]
     pub fn get_depend_stage_sync(&self, stage_id: usize) -> Option<usize> {
         let _map = self.stage_lineages.read().unwrap();
         _map.get(&stage_id).cloned()
@@ -707,7 +710,7 @@ impl<T: Send + Sync> Lock for OwnedMutexGuard<T> {
     async fn unlock(&mut self) {}
 }
 
-/// Returns the the unresolved shuffles in the execution plan
+/// Returns the unresolved shuffles in the execution plan
 fn find_unresolved_shuffles(
     plan: &Arc<dyn ExecutionPlan>,
 ) -> Result<Vec<UnresolvedShuffleExec>> {
@@ -719,7 +722,7 @@ fn find_unresolved_shuffles(
         Ok(plan
             .children()
             .iter()
-            .map(|child| find_unresolved_shuffles(child))
+            .map(find_unresolved_shuffles)
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .flatten()

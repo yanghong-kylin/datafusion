@@ -1349,6 +1349,15 @@ pub fn unnormalize_cols(exprs: impl IntoIterator<Item = Expr>) -> Vec<Expr> {
     exprs.into_iter().map(unnormalize_col).collect()
 }
 
+/// Recursively un-alias an expressions
+#[inline]
+pub fn unalias(expr: Expr) -> Expr {
+    match expr {
+        Expr::Alias(sub_expr, _) => unalias(*sub_expr),
+        _ => expr,
+    }
+}
+
 /// Create an expression to represent the min() aggregate function
 pub fn min(expr: Expr) -> Expr {
     Expr::AggregateFunction {
@@ -1972,10 +1981,27 @@ fn create_name(e: &Expr, input_schema: &DFSchema) -> Result<String> {
                 Ok(format!("{} IN ({:?})", expr, list))
             }
         }
-        other => Err(DataFusionError::NotImplemented(format!(
-            "Create name does not support logical expression {:?}",
-            other
-        ))),
+        Expr::Between {
+            expr,
+            negated,
+            low,
+            high,
+        } => {
+            let expr = create_name(expr, input_schema)?;
+            let low = create_name(low, input_schema)?;
+            let high = create_name(high, input_schema)?;
+            if *negated {
+                Ok(format!("{} NOT BETWEEN {} AND {}", expr, low, high))
+            } else {
+                Ok(format!("{} BETWEEN {} AND {}", expr, low, high))
+            }
+        }
+        Expr::Sort { .. } => Err(DataFusionError::Internal(
+            "Create name does not support sort expression".to_string(),
+        )),
+        Expr::Wildcard => Err(DataFusionError::Internal(
+            "Create name does not support wildcard".to_string(),
+        )),
     }
 }
 

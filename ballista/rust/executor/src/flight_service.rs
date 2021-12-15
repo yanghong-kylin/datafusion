@@ -57,12 +57,12 @@ type FlightDataReceiver = Receiver<Result<FlightData, Status>>;
 #[derive(Clone)]
 pub struct BallistaFlightService {
     /// Executor
-    executor: Arc<Executor>,
+    _executor: Arc<Executor>,
 }
 
 impl BallistaFlightService {
-    pub fn new(executor: Arc<Executor>) -> Self {
-        Self { executor }
+    pub fn new(_executor: Arc<Executor>) -> Self {
+        Self { _executor }
     }
 }
 
@@ -197,7 +197,7 @@ impl FlightService for BallistaFlightService {
             } => {
                 info!("Trying to read PushPartition job {:?}, stage {:?} and partition {:?}", job_id, stage_id, partition_id);
                 {
-                    let channels_map = self.executor.channels.read().unwrap();
+                    let channels_map = self._executor.channels.read().unwrap();
                     let channel_key = (job_id, stage_id);
                     match channels_map.get(&channel_key) {
                         Some(d) => {
@@ -229,7 +229,7 @@ impl FlightService for BallistaFlightService {
         }
 
         {
-            let mut channels_map = self.executor.channels.write().unwrap();
+            let mut channels_map = self._executor.channels.write().unwrap();
             channels_map.remove(&channel_key);
         }
 
