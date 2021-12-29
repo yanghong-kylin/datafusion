@@ -30,7 +30,9 @@ then
   containerID=`docker run -d $repo:$version`
   docker cp $containerID:/root/tmp `pwd`
   docker rm -f $containerID >/dev/null
-  mv tmp `pwd`/data/tpch-1g-oneFile
+  mkdir -p `pwd`/data/tpch-1g-oneFile
+  mv tmp/* `pwd`/data/tpch-1g-oneFile
+  rm -r tmp
 else
   echo "data exists."
 fi
