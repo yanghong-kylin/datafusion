@@ -45,7 +45,7 @@ function startScheduler() {
   scheduler_count=$(schedulerCount)
       while(($scheduler_count<$total))
       do
-        nohup cargo run  -v --bin ballista-scheduler > /tmp/ballista_scheduler.out 2>&1 & echo $! > /tmp/ballista_scheduler.pid
+        nohup cargo run  --release --bin ballista-scheduler > /tmp/ballista_scheduler.out 2>&1 & echo $! > /tmp/ballista_scheduler.pid
         sleep 2s
         scheduler_count=$(schedulerCount)
         echo "$scheduler_count"
@@ -71,7 +71,7 @@ function startExecutorWithNumber() {
   do
   ((start_port=$start_port+1))
   echo "bind_port: $start_port"
-  nohup cargo run  --bin ballista-executor -- --bind-port "$start_port" > /tmp/ballista_executor"$executor_count".out 2>&1 & echo $! > /tmp/ballista_executor"$executor_count".pid
+  nohup cargo run  --release --bin ballista-executor -- --bind-port "$start_port" > /tmp/ballista_executor"$executor_count".out 2>&1 & echo $! > /tmp/ballista_executor"$executor_count".pid
   sleep 2s
   executor_count=$(executorCount)
   done
@@ -82,7 +82,7 @@ function testDatafusion() {
   pushd ..
   for query in 1 3 5 6 7 10 12 13
   do
-    RUST_LOG=INFO cargo run --bin tpch -- benchmark datafusion --query  $query --path "$data_path" --format parquet
+    RUST_LOG=INFO cargo run  --release --bin tpch -- benchmark datafusion --query  $query --path "$data_path" --format parquet
   done
   popd
 }
@@ -98,7 +98,7 @@ function testBallistaWithExecutors() {
   pushd ..
   for query in 1 3 5 6 7 10 12 13
   do
-    RUST_LOG=INFO cargo run  --bin tpch -- benchmark ballista --host localhost --port 50050  --query  $query --path "$data_path" --format parquet --debug
+    RUST_LOG=INFO cargo run  --release --bin tpch -- benchmark ballista --host localhost --port 50050  --query  $query --path "$data_path" --format parquet --debug
   done
   popd
 }
