@@ -37,6 +37,12 @@ default = "50050"
 doc = "scheduler port"
 
 [[param]]
+name = "bind_grpc_port"
+type = "u16"
+default = "50052"
+doc = "bind grpc service port"
+
+[[param]]
 name = "bind_host"
 type = "String"
 default = "std::string::String::from(\"0.0.0.0\")"
@@ -65,3 +71,10 @@ name = "concurrent_tasks"
 type = "usize"
 default = "10"
 doc = "Max concurrent tasks."
+
+[[param]]
+abbr = "s"
+name = "task_scheduling_policy"
+type = "ballista_core::config::TaskSchedulingPolicy"
+doc = "The task scheduing policy for the scheduler, see TaskSchedulingPolicy::variants() for options. Default: PullStaged"
+default = "ballista_core::config::TaskSchedulingPolicy::PullStaged"

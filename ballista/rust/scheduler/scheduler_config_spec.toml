@@ -34,9 +34,9 @@ default = "ballista_scheduler::ConfigBackend::Standalone"
 [[param]]
 abbr = "s"
 name = "scheduler_policy"
-type = "ballista_scheduler::SchedulerPolicy"
-doc = "The scheduing policy for the scheduler, see SchedulerPolicy::variants() for options. Default: Staged"
-default = "ballista_scheduler::SchedulerPolicy::AllAtOnce"
+type = "ballista_core::config::TaskSchedulingPolicy"
+doc = "The scheduing policy for the scheduler, see TaskSchedulingPolicy::variants() for options. Default: PullStaged"
+default = "ballista_core::config::TaskSchedulingPolicy::PullStaged"
 
 [[param]]
 abbr = "n"

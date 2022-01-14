@@ -36,10 +36,14 @@ use ballista_scheduler::state::EtcdClient;
 #[cfg(feature = "sled")]
 use ballista_scheduler::state::StandaloneClient;
 use ballista_scheduler::{
-    state::ConfigBackendClient, ConfigBackend, SchedulerPolicy, SchedulerServer,
+    state::ConfigBackendClient, ConfigBackend, SchedulerEnv, SchedulerServer,
+    TaskScheduler,
 };
 
+use ballista_core::config::TaskSchedulingPolicy;
 use log::info;
+use tokio::sync::mpsc;
+use tonic::transport::server::Connected;
 
 #[macro_use]
 extern crate configure_me;
@@ -59,21 +63,42 @@ async fn start_server(
     config_backend: Arc<dyn ConfigBackendClient>,
     namespace: String,
     addr: SocketAddr,
-    policy: SchedulerPolicy,
+    policy: TaskSchedulingPolicy,
 ) -> Result<()> {
     info!(
         "Ballista v{} Scheduler listening on {:?}",
         BALLISTA_VERSION, addr
     );
 
-    Ok(Server::bind(&addr)
-        .serve(make_service_fn(move |request: &AddrStream| {
-            let scheduler_server = SchedulerServer::new(
+    info!(
+        "Starting Scheduler grpc server with task scheduling policy of {:?}",
+        policy
+    );
+    let scheduler_server = match policy {
+        TaskSchedulingPolicy::PushStaged => {
+            // TODO make the buffer size configurable
+            let (tx_job, rx_job) = mpsc::channel::<String>(10000);
+            let scheduler_server = SchedulerServer::new_with_policy(
                 config_backend.clone(),
                 namespace.clone(),
-                request.remote_addr().ip(),
                 policy,
+                Some(SchedulerEnv { tx_job }),
             );
+            let task_scheduler = TaskScheduler::new(Arc::new(scheduler_server.clone()));
+            task_scheduler.start(rx_job);
+            scheduler_server
+        }
+        TaskSchedulingPolicy::PullAllAtOnce => SchedulerServer::new_with_policy(
+            config_backend.clone(),
+            namespace.clone(),
+            policy,
+            None,
+        ),
+        _ => SchedulerServer::new(config_backend.clone(), namespace.clone()),
+    };
+
+    Ok(Server::bind(&addr)
+        .serve(make_service_fn(move |request: &AddrStream| {
             let scheduler_grpc_server =
                 SchedulerGrpcServer::new(scheduler_server.clone());
 
@@ -83,10 +108,15 @@ async fn start_server(
                 .add_service(scheduler_grpc_server)
                 .add_service(keda_scaler)
                 .into_service();
-            let mut warp = warp::service(get_routes(scheduler_server));
+            let mut warp = warp::service(get_routes(scheduler_server.clone()));
 
+            let connect_info = request.connect_info();
             future::ok::<_, Infallible>(tower::service_fn(
                 move |req: hyper::Request<hyper::Body>| {
+                    let (mut parts, body) = req.into_parts();
+                    parts.extensions.insert(connect_info.clone());
+                    let req = http::Request::from_parts(parts, body);
+
                     let header = req.headers().get(hyper::header::ACCEPT);
                     if header.is_some() && header.unwrap().eq("application/json") {
                         return Either::Left(
@@ -163,7 +193,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    let policy: SchedulerPolicy = opt.scheduler_policy;
+    let policy: TaskSchedulingPolicy = opt.scheduler_policy;
     start_server(client, namespace, addr, policy).await?;
     Ok(())
 }
