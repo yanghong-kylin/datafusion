@@ -1,23 +1,43 @@
-FROM hub.tess.io/kubernetes/tess-build-jenkins:latest
+FROM centos:7.3.1611
 
 MAINTAINER DL-eBay-Kylin-Core <DL-eBay-Kylin-Core@ebay.com>
 
 WORKDIR /tmp
 
+# install system tools
+RUN set -x \
+    && yum install -y which \
+       openssh-clients \
+       unzip \
+       sudo \
+       net-tools \
+       iftop \
+       tcpdump \
+       perf \
+       telnet \
+       lsof \
+       wget \
+       gcc \
+       gcc-c++ \
+       make \
+    && yum clean all
+
 # install jdk
 RUN set -x \
-    && apt-get install -y openjdk-8-jdk \
+    && yum install -y \
+       java-1.8.0-openjdk \
+       java-1.8.0-openjdk-devel \
+    && yum clean all \
     && java -version
 
-ENV JAVA_HOME /usr/lib/jvm/java-8-openjdk-amd64
+ENV JAVA_HOME /etc/alternatives/java_sdk
 
 # install llvm
 RUN set -x \
-    && apt install -y lsb-release wget software-properties-common apt-transport-https \
-    && cd /tmp \
-    && wget https://apt.llvm.org/llvm.sh \
-    && chmod +x llvm.sh \
-    && ./llvm.sh 12
+    && yum install -y centos-release-scl
+
+RUN set -x \    
+    && yum install -y llvm-toolset-7
 
 
 # install hadoop clients
