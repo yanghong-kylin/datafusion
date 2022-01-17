@@ -58,6 +58,11 @@ RUN set -x \
 # install Rust
 RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
 
+# install git
+RUN set -x \
+    && yum install -y git \
+    && git version \
+
 ENV PATH=$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin:$HADOOP_HOME/sbin:$HOME/.cargo/bin
 
 RUN echo "export CLASSPATH=`hadoop classpath --glob`:$CLASSPATH" >> $HOME/.bashrc

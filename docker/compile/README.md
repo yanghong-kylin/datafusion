@@ -27,4 +27,3 @@ Run container with mounting local rust source code folder DataFusion
 > docker cp datafusion-compile:/root/DataFusion/target/release/datafusion-cli release-binaries/
 > docker cp datafusion-compile:/root/DataFusion/target/release/ballista-scheduler release-binaries/
 > docker cp datafusion-compile:/root/DataFusion/target/release/ballista-executor release-binaries/
-> docker cp datafusion-compile:/root/DataFusion/target/release/ballista-sql release-binaries/
