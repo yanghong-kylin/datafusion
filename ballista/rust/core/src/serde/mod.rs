@@ -18,6 +18,7 @@
 //! This crate contains code generated from the Ballista Protocol Buffer Definition as well
 //! as convenience code for interacting with the generated code.
 
+use std::sync::Arc;
 use std::{convert::TryInto, io::Cursor};
 
 use datafusion::logical_plan::{JoinConstraint, JoinType, Operator};
@@ -26,6 +27,7 @@ use datafusion::physical_plan::window_functions::BuiltInWindowFunction;
 
 use crate::{error::BallistaError, serde::scheduler::Action as BallistaAction};
 
+use datafusion::datasource::object_store::{ObjectStore, ObjectStoreRegistry};
 use prost::Message;
 
 // include the generated protobuf source as a submodule
@@ -48,6 +50,16 @@ pub fn decode_protobuf(bytes: &[u8]) -> Result<BallistaAction, BallistaError> {
 
 pub(crate) fn proto_error<S: Into<String>>(message: S) -> BallistaError {
     BallistaError::General(message.into())
+}
+
+/// Get object store by uri with pull path
+pub(crate) fn get_by_uri<'a>(
+    uri: &'a str,
+) -> Result<(Arc<dyn ObjectStore>, &'a str), BallistaError> {
+    let object_store_registry = ObjectStoreRegistry::new();
+    object_store_registry
+        .get_by_uri(uri)
+        .map_err(BallistaError::DataFusionError)
 }
 
 #[macro_export]

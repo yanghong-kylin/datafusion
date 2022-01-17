@@ -151,6 +151,10 @@ impl ListingTable {
     pub fn table_path(&self) -> &str {
         &self.table_path
     }
+    /// Get full path with object store schema
+    pub fn table_full_path(&self) -> String {
+        format!("{}{}", self.object_store.get_scheme(), self.table_path)
+    }
     /// Get options ref
     pub fn options(&self) -> &ListingOptions {
         &self.options

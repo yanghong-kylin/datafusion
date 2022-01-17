@@ -655,7 +655,7 @@ impl TryInto<protobuf::LogicalPlanNode> for &LogicalPlan {
                                     .options()
                                     .table_partition_cols
                                     .clone(),
-                                path: listing_table.table_path().to_owned(),
+                                path: listing_table.table_full_path(),
                                 schema: Some(schema),
                                 projection,
                                 filters,

@@ -27,28 +27,40 @@ async fn main() -> Result<()> {
         .build()?;
     let ctx = BallistaContext::remote("localhost", 50050, &config);
 
-    let testdata = datafusion::arrow::util::test_util::arrow_test_data();
-
-    // register csv file with the execution context
-    ctx.register_csv(
-        "aggregate_test_100",
-        &format!("{}/csv/aggregate_test_100.csv", testdata),
-        CsvReadOptions::new(),
-    )
-    .await?;
-
-    // execute the query
-    let df = ctx
-        .sql(
-            "SELECT c1, MIN(c12), MAX(c12) \
-        FROM aggregate_test_100 \
-        WHERE c11 > 0.1 AND c11 < 0.9 \
-        GROUP BY c1",
+    {
+        let testdata = datafusion::arrow::util::test_util::arrow_test_data();
+        // register csv file with the execution context
+        ctx.register_csv(
+            "aggregate_test_100",
+            &format!("{}/csv/aggregate_test_100.csv", testdata),
+            CsvReadOptions::new(),
         )
         .await?;
 
-    // print the results
-    df.show().await?;
+        // execute the query
+        let df = ctx
+            .sql(
+                "SELECT c1, MIN(c12), MAX(c12) \
+        FROM aggregate_test_100 \
+        WHERE c11 > 0.1 AND c11 < 0.9 \
+        GROUP BY c1",
+            )
+            .await?;
+
+        // print the results
+        df.show().await?;
+    }
+
+    {
+        let testdata = datafusion::test_util::parquet_test_data();
+        let filename = "alltypes_plain";
+        ctx.register_parquet(filename, &format!("{}/{}.parquet", testdata, filename))
+            .await?;
+
+        let df = ctx.sql("SELECT count(*) FROM alltypes_plain").await?;
+
+        df.show().await?;
+    }
 
     Ok(())
 }

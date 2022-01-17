@@ -18,7 +18,9 @@
 //! Serde code to convert from protocol buffers to Rust data structures.
 
 use crate::error::BallistaError;
-use crate::serde::{from_proto_binary_op, proto_error, protobuf, str_to_byte};
+use crate::serde::{
+    from_proto_binary_op, get_by_uri, proto_error, protobuf, str_to_byte,
+};
 use crate::{convert_box_required, convert_required};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datafusion::datasource::file_format::avro::AvroFormat;
@@ -26,8 +28,7 @@ use datafusion::datasource::file_format::csv::CsvFormat;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::listing::{ListingOptions, ListingTable};
-use datafusion::datasource::object_store::local::LocalFileSystem;
-use datafusion::datasource::object_store::{FileMeta, SizedFile};
+use datafusion::datasource::object_store::{FileMeta, ObjectStoreRegistry, SizedFile};
 use datafusion::logical_plan::window_frames::{
     WindowFrame, WindowFrameBound, WindowFrameUnits,
 };
@@ -197,9 +198,11 @@ impl TryInto<LogicalPlan> for &protobuf::LogicalPlanNode {
                     target_partitions: scan.target_partitions as usize,
                 };
 
+                // Get the object store by the uri
+                let (store, relative_path) = get_by_uri(&scan.path).unwrap();
                 let provider = ListingTable::new(
-                    Arc::new(LocalFileSystem {}),
-                    scan.path.clone(),
+                    store,
+                    relative_path.to_owned(),
                     Arc::new(schema),
                     options,
                 );

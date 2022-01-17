@@ -29,14 +29,15 @@ use crate::serde::protobuf::repartition_exec_node::PartitionMethod;
 use crate::serde::protobuf::ShuffleReaderPartition;
 use crate::serde::scheduler::ExecutorMeta;
 use crate::serde::scheduler::PartitionLocation;
-use crate::serde::{from_proto_binary_op, proto_error, protobuf, str_to_byte};
+use crate::serde::{
+    from_proto_binary_op, get_by_uri, proto_error, protobuf, str_to_byte,
+};
 use crate::{convert_box_required, convert_required, into_required};
 use chrono::{TimeZone, Utc};
 use datafusion::arrow::datatypes::{DataType, Schema, SchemaRef};
 use datafusion::catalog::catalog::{
     CatalogList, CatalogProvider, MemoryCatalogList, MemoryCatalogProvider,
 };
-use datafusion::datasource::object_store::local::LocalFileSystem;
 use datafusion::datasource::object_store::{FileMeta, ObjectStoreRegistry, SizedFile};
 use datafusion::datasource::PartitionedFile;
 use datafusion::execution::context::{
@@ -80,7 +81,7 @@ use datafusion::physical_plan::{
     AggregateExpr, ColumnStatistics, ExecutionPlan, PhysicalExpr, Statistics, WindowExpr,
 };
 use datafusion::prelude::CsvReadOptions;
-use log::debug;
+use log::{debug, info};
 use protobuf::physical_expr_node::ExprType;
 use protobuf::physical_plan_node::PhysicalPlanType;
 
@@ -810,8 +811,12 @@ impl TryInto<PhysicalPlanConfig> for &protobuf::FileScanExecConf {
         };
         let statistics = convert_required!(self.statistics)?;
 
+        let sample_uri = &self.file_groups.get(0).unwrap().files.get(0).unwrap().path;
+        info!("sample uri: {:?}", sample_uri);
+        // Get the object store by the uri
+        let (store, _relative_path) = get_by_uri(sample_uri).unwrap();
         Ok(PhysicalPlanConfig {
-            object_store: Arc::new(LocalFileSystem {}),
+            object_store: store,
             file_schema: schema,
             file_groups: self
                 .file_groups
