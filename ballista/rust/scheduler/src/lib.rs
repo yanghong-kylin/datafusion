@@ -624,6 +624,7 @@ impl SchedulerGrpc for SchedulerServer {
                     error!("{}", msg);
                     tonic::Status::internal(msg)
                 })?;
+                let num_tasks = task_status.len();
                 for task_status in task_status {
                     self.state
                         .save_task_status(&task_status)
@@ -637,6 +638,27 @@ impl SchedulerGrpc for SchedulerServer {
                         jobs.insert(task_status.partition_id.unwrap().job_id.clone());
                     }
                 }
+                let mut executor_data = self
+                    .state
+                    ._get_executor_data(&metadata.id)
+                    .await
+                    .map_err(|e| {
+                        let msg = format!(
+                            "Could not get metadata data for id {:?}: {}",
+                            &metadata.id, e
+                        );
+                        error!("{}", msg);
+                        tonic::Status::internal(msg)
+                    })?;
+                executor_data.available_task_slots += num_tasks as u32;
+                self.state
+                    .save_executor_data(executor_data)
+                    .await
+                    .map_err(|e| {
+                        let msg = format!("Could not save metadata data: {}", e);
+                        error!("{}", msg);
+                        tonic::Status::internal(msg)
+                    })?;
                 lock.unlock().await;
             }
             let tx_job = self.scheduler_env.as_ref().unwrap().tx_job.clone();
