@@ -89,5 +89,5 @@ fn setup_with_hdfs_data(filename: &str) -> (HadoopFileSystem, String, String) {
 fn teardown(tmp_dir: &str) {
     let dfs = minidfs::get_dfs();
     let fs = dfs.get_hdfs().ok().unwrap();
-    assert!(fs.delete(&tmp_dir, true).is_ok());
+    assert!(fs.delete(tmp_dir, true).is_ok());
 }

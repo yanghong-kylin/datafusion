@@ -39,6 +39,10 @@ pub struct LocalFileSystem;
 
 #[async_trait]
 impl ObjectStore for LocalFileSystem {
+    fn get_scheme(&self) -> &str {
+        LOCAL_SCHEME
+    }
+
     fn get_relative_path<'a>(&self, uri: &'a str) -> &'a str {
         let mut result = uri;
         if let Some((scheme, path)) = uri.split_once("://") {

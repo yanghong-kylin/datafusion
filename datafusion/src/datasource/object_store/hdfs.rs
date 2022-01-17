@@ -34,7 +34,9 @@ use crate::datasource::PartitionedFile;
 use crate::error::{DataFusionError, Result};
 
 /// scheme for HDFS File System
-pub static HDFS_SCHEME: &'static str = "hdfs";
+pub static HDFS_SCHEME: &str = "hdfs";
+/// scheme for HDFS Federation File System
+pub static VIEWFS_SCHEME: &str = "viewfs";
 
 /// Hadoop File.
 #[derive(Clone, Debug)]
@@ -51,7 +53,7 @@ impl Read for HadoopFile {
         self.inner
             .read(buf)
             .map(|read_len| read_len as usize)
-            .map_err(|e| to_error(e))
+            .map_err(to_error)
     }
 }
 
@@ -65,6 +67,13 @@ impl HadoopFileSystem {
     /// Get HdfsFs configured by default configuration files
     pub fn new() -> Result<Self> {
         HdfsFs::default()
+            .map(|fs| HadoopFileSystem { inner: fs })
+            .map_err(|e| DataFusionError::IoError(to_error(e)))
+    }
+
+    /// Get HdfsFs by uri, only one global instance will be created for the same scheme
+    pub fn new_with_uri(uri: &str) -> Result<Self> {
+        HdfsFs::new(uri)
             .map(|fs| HadoopFileSystem { inner: fs })
             .map_err(|e| DataFusionError::IoError(to_error(e)))
     }
@@ -90,10 +99,7 @@ impl HadoopFileSystem {
     ) -> Result<Vec<FileMeta>> {
         let mut files = Vec::new();
 
-        let children = self
-            .inner
-            .list_status(path.as_str())
-            .map_err(|e| to_error(e))?;
+        let children = self.inner.list_status(path.as_str()).map_err(to_error)?;
         for child in children {
             let child_path = child.name();
             if child.is_directory() {
@@ -109,11 +115,15 @@ impl HadoopFileSystem {
 
 #[async_trait]
 impl ObjectStore for HadoopFileSystem {
+    fn get_scheme(&self) -> &str {
+        self.inner.url()
+    }
+
     fn get_relative_path<'a>(&self, uri: &'a str) -> &'a str {
         let mut result = uri;
         if let Some((scheme, path_without_schema)) = uri.split_once("://") {
-            assert_eq!(scheme, HDFS_SCHEME);
-            let start_index = path_without_schema.find("/").unwrap();
+            assert!(scheme == HDFS_SCHEME || scheme == VIEWFS_SCHEME);
+            let start_index = path_without_schema.find('/').unwrap();
             let (_host_address, path) = path_without_schema.split_at(start_index);
             result = path;
         }

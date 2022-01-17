@@ -33,6 +33,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::{AsyncRead, Stream, StreamExt};
 
+use crate::datasource::object_store::hdfs::HadoopFileSystem;
 use local::LocalFileSystem;
 
 use crate::error::{DataFusionError, Result};
@@ -132,6 +133,11 @@ pub type ObjectReaderStream =
 /// It maps strings (e.g. URLs, filesystem paths, etc) to sources of bytes
 #[async_trait]
 pub trait ObjectStore: Sync + Send + Debug {
+    /// Return scheme of the object store
+    /// For HDFS, it will be like hdfs://namenode:port
+    /// For local file system, it will be like file
+    fn get_scheme(&self) -> &str;
+
     /// Path relative to the current object store
     /// (it does not specify the `xx://` scheme).
     fn get_relative_path<'a>(&self, uri: &'a str) -> &'a str;
@@ -232,6 +238,18 @@ impl ObjectStoreRegistry {
         &self,
         uri: &'a str,
     ) -> Result<(Arc<dyn ObjectStore>, &'a str)> {
+        if let Ok((store, path_relative)) = self.get_by_uri_coarse(uri) {
+            Ok((store, path_relative))
+        } else {
+            self.get_by_uri_self_registration(uri)
+        }
+    }
+
+    /// A coarse check of whether the object store is registered
+    fn get_by_uri_coarse<'a>(
+        &self,
+        uri: &'a str,
+    ) -> Result<(Arc<dyn ObjectStore>, &'a str)> {
         if let Some((scheme, _path)) = uri.split_once("://") {
             let stores = self.object_stores.read().unwrap();
             let store = stores
@@ -247,6 +265,48 @@ impl ObjectStoreRegistry {
             Ok((store, path_relative))
         } else {
             Ok((Arc::new(LocalFileSystem), uri))
+        }
+    }
+
+    /// try to get an object store for the uri, like hdfs, s3
+    /// If it's able to get an object store, then register it if not stored
+    fn get_by_uri_self_registration<'a>(
+        &self,
+        uri: &'a str,
+    ) -> Result<(Arc<dyn ObjectStore>, &'a str)> {
+        #[cfg(feature = "hdfs")]
+        {
+            if let Ok((store, path_relative)) = self.get_by_hdfs_uri(uri) {
+                return Ok((store, path_relative));
+            }
+        }
+
+        Err(DataFusionError::Internal(format!(
+            "No suitable object store found for {}",
+            uri
+        )))
+    }
+
+    #[cfg(feature = "hdfs")]
+    /// try to get HadoopFileSystem for the uri
+    fn get_by_hdfs_uri<'a>(
+        &self,
+        uri: &'a str,
+    ) -> Result<(Arc<dyn ObjectStore>, &'a str)> {
+        let mut stores = self.object_stores.write().unwrap();
+        if let Ok(hdfs_store) = HadoopFileSystem::new_with_uri(uri) {
+            let store = Arc::new(hdfs_store);
+            let hdfs_url = store.get_scheme().to_lowercase();
+            if stores.get(&hdfs_url).is_none() {
+                stores.insert(hdfs_url, store.clone());
+            }
+            let path_relative = store.get_relative_path(uri);
+            Ok((store, path_relative))
+        } else {
+            Err(DataFusionError::Internal(format!(
+                "No suitable HadoopFileSystem found for {}",
+                uri
+            )))
         }
     }
 }
