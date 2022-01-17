@@ -133,9 +133,7 @@ impl BallistaContext {
         path: &str,
         options: AvroReadOptions<'_>,
     ) -> Result<Arc<dyn DataFrame>> {
-        // convert to absolute path because the executor likely has a different working directory
-        let path = PathBuf::from(path);
-        let path = fs::canonicalize(&path)?;
+        let path = self.canonicalize_path(path).await?;
 
         // use local DataFusion context for now but later this might call the scheduler
         let mut ctx = {
@@ -146,16 +144,14 @@ impl BallistaContext {
                 guard.config(),
             )
         };
-        let df = ctx.read_avro(path.to_str().unwrap(), options).await?;
+        let df = ctx.read_avro(path, options).await?;
         Ok(df)
     }
 
     /// Create a DataFrame representing a Parquet table scan
     /// TODO fetch schema from scheduler instead of resolving locally
     pub async fn read_parquet(&self, path: &str) -> Result<Arc<dyn DataFrame>> {
-        // convert to absolute path because the executor likely has a different working directory
-        let path = PathBuf::from(path);
-        let path = fs::canonicalize(&path)?;
+        let path = self.canonicalize_path(path).await?;
 
         // use local DataFusion context for now but later this might call the scheduler
         let mut ctx = {
@@ -166,7 +162,7 @@ impl BallistaContext {
                 guard.config(),
             )
         };
-        let df = ctx.read_parquet(path.to_str().unwrap()).await?;
+        let df = ctx.read_parquet(path).await?;
         Ok(df)
     }
 
@@ -177,9 +173,7 @@ impl BallistaContext {
         path: &str,
         options: CsvReadOptions<'_>,
     ) -> Result<Arc<dyn DataFrame>> {
-        // convert to absolute path because the executor likely has a different working directory
-        let path = PathBuf::from(path);
-        let path = fs::canonicalize(&path)?;
+        let path = self.canonicalize_path(path).await?;
 
         // use local DataFusion context for now but later this might call the scheduler
         let mut ctx = {
@@ -190,8 +184,20 @@ impl BallistaContext {
                 guard.config(),
             )
         };
-        let df = ctx.read_csv(path.to_str().unwrap(), options).await?;
+        let df = ctx.read_csv(path, options).await?;
         Ok(df)
+    }
+
+    /// convert to absolute path because the executor likely has a different working directory
+    async fn canonicalize_path(&self, path: &str) -> Result<String> {
+        let path = if let Some((_scheme, _path)) = path.split_once("://") {
+            path.to_string()
+        } else {
+            let path = PathBuf::from(path);
+            let path = fs::canonicalize(&path)?;
+            path.into_os_string().into_string().unwrap()
+        };
+        Ok(path)
     }
 
     /// Register a DataFrame as a table that can be referenced from a SQL query
