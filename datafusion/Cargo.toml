@@ -79,7 +79,7 @@ rand = "0.8"
 avro-rs = { version = "0.13", features = ["snappy"], optional = true }
 num-traits = { version = "0.2", optional = true }
 pyo3 = { version = "0.14", optional = true }
-fs-hdfs = { git = "https://github.com/yahoNanJing/fs-hdfs.git", branch  = "hadoop-2.7.3", optional = true }
+fs-hdfs = { version = "^0.1.4", optional = true }
 uuid = { version = "^0.8", features = ["v4"] }
 
 [dev-dependencies]
