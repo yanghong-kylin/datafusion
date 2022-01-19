@@ -852,7 +852,7 @@ impl SchedulerGrpc for SchedulerServer {
 
                 println!(
                     "=== Physical plan ===\n{}\n",
-                    displayable(plan.as_ref()).indent().to_string()
+                    displayable(plan.as_ref()).indent()
                 );
 
                 info!(
