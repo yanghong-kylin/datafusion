@@ -310,7 +310,7 @@ impl ShuffleWriterExec {
 
                 Ok(vec![ShuffleWritePartition {
                     partition_id: input_partition as u64,
-                    path: path.to_owned(),
+                    path,
                     num_batches: stats.num_batches.unwrap_or(0),
                     num_rows: stats.num_rows.unwrap_or(0),
                     num_bytes: stats.num_bytes.unwrap_or(0),
@@ -406,7 +406,7 @@ impl ShuffleWriterExec {
                                         )?;
                                         writer.write(output_batch)?;
                                         writers[output_partition] =
-                                            Some(ShuffleWriter::File(writer));
+                                            Some(ShuffleWriter::File(Box::from(writer)));
                                     }
                                     OutputLocation::Executors(execs) => {
                                         assert_eq!(execs.len(), num_output_partitions);
@@ -609,7 +609,7 @@ fn result_schema() -> SchemaRef {
 
 /// Different Shuffle writers
 enum ShuffleWriter {
-    File(FileShuffleWriter),
+    File(Box<FileShuffleWriter>),
     Flight(FlightShuffleWriter),
     Local(LocalShuffleWriter),
 }

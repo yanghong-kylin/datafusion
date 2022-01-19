@@ -53,9 +53,9 @@ pub(crate) fn proto_error<S: Into<String>>(message: S) -> BallistaError {
 }
 
 /// Get object store by uri with pull path
-pub(crate) fn get_by_uri<'a>(
-    uri: &'a str,
-) -> Result<(Arc<dyn ObjectStore>, &'a str), BallistaError> {
+pub(crate) fn get_by_uri(
+    uri: &str,
+) -> Result<(Arc<dyn ObjectStore>, &str), BallistaError> {
     let object_store_registry = ObjectStoreRegistry::new();
     object_store_registry
         .get_by_uri(uri)

@@ -32,6 +32,9 @@ use datafusion::physical_plan::{ExecutionPlan, Partitioning};
 use hashbrown::HashMap;
 use tokio::sync::mpsc::Sender;
 
+type ExecutorChannel =
+    RwLock<HashMap<(String, usize), Vec<Sender<ArrowResult<RecordBatch>>>>>;
+
 /// Ballista executor
 pub struct Executor {
     /// Directory for storing partial results
@@ -39,7 +42,7 @@ pub struct Executor {
 
     /// Channels for sending partial shuffle partitions to stream shuffle reader.
     /// Key is the jobId + stageId.
-    pub channels: RwLock<HashMap<(String, usize), Vec<Sender<ArrowResult<RecordBatch>>>>>,
+    pub channels: ExecutorChannel,
 
     /// Specification like total task slots
     pub specification: ExecutorSpecification,
@@ -128,7 +131,7 @@ impl Executor {
             let local_senders = self.get_local_senders(channel_key);
             let par = exec.execute_shuffle_write(part, local_senders).await?;
             let mut channels_map = self.channels.write().unwrap();
-            channels_map.remove(&channel_key);
+            channels_map.remove(channel_key);
             par
         } else {
             exec.execute_shuffle_write(part, None).await?

@@ -582,9 +582,9 @@ impl SchedulerState {
                                 &partition.job_id,
                                 push_shuffle.stage_id()
                             );
-                            return Err(BallistaError::General(format!(
-                                "Reduce task finish too early before map task for push based shuffle."
-                            )));
+                            return Err(BallistaError::General(
+                                "Reduce task finish too early before map task for push based shuffle.".to_string()
+                            ));
                         } else {
                             debug!(
                                 "Stage {} output partition {} has not scheduled yet",
@@ -611,11 +611,7 @@ impl SchedulerState {
     }
 
     #[allow(dead_code)]
-    pub fn save_stage_lineages_sync(
-        &self,
-        stage_id: usize,
-        depend_stage_id: usize,
-    ) -> () {
+    pub fn save_stage_lineages_sync(&self, stage_id: usize, depend_stage_id: usize) {
         let mut _map = self.stage_lineages.write().unwrap();
         _map.insert(stage_id, depend_stage_id);
     }

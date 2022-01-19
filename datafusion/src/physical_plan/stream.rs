@@ -52,7 +52,7 @@ impl RecordBatchReceiverStream {
         Box::pin(Self {
             schema,
             inner,
-            drop_helper: join_handle.map(|h| AbortOnDropSingle::new(h)),
+            drop_helper: join_handle.map(AbortOnDropSingle::new),
         })
     }
 }

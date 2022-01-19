@@ -112,7 +112,7 @@ async fn register_executor(
     let result = scheduler
         .register_executor(RegisterExecutorParams {
             metadata: Some(executor_meta.clone()),
-            specification: Some(specification.clone().into()),
+            specification: Some((*specification).into()),
         })
         .await?;
     if result.into_inner().success {
