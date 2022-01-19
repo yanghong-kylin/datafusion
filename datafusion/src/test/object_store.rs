@@ -49,6 +49,10 @@ impl TestObjectStore {
 
 #[async_trait]
 impl ObjectStore for TestObjectStore {
+    fn get_scheme(&self) -> &str {
+        "file://"
+    }
+
     fn get_relative_path<'a>(&self, uri: &'a str) -> &'a str {
         uri
     }
