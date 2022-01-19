@@ -15,16 +15,21 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#[cfg(feature = "hdfs")]
 use ballista::prelude::*;
 use datafusion::error::Result;
+#[cfg(feature = "hdfs")]
 use datafusion::test_util::hdfs::run_hdfs_test;
+#[cfg(feature = "hdfs")]
 use std::future::Future;
+#[cfg(feature = "hdfs")]
 use std::pin::Pin;
 
 /// This example demonstrates executing a simple query against an Arrow data source (CSV) and
 /// fetching results, using SQL
 #[tokio::main]
 async fn main() -> Result<()> {
+    #[cfg(feature = "hdfs")]
     run_with_register_alltypes_parquet(|ctx| {
         Box::pin(async move {
             {
@@ -57,6 +62,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "hdfs")]
 /// Run query after table registered with parquet file on hdfs
 pub async fn run_with_register_alltypes_parquet<F>(test_query: F) -> Result<()>
 where

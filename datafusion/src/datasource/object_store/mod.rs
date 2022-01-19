@@ -33,6 +33,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::{AsyncRead, Stream, StreamExt};
 
+#[cfg(feature = "hdfs")]
 use crate::datasource::object_store::hdfs::HadoopFileSystem;
 use local::LocalFileSystem;
 

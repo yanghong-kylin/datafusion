@@ -20,7 +20,7 @@ Run container with mounting local rust source code folder DataFusion
 
 > cp -r /tmp/DataFusion ~/
 > cd ~/DataFusion
-> cargo build --release
+> cargo build --release --features hdfs
 
 ## Copy Binary
 
