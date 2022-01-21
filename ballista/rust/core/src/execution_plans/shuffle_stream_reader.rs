@@ -84,7 +84,7 @@ impl ShuffleStreamReaderExec {
         let (response_tx, response_rx): (
             Sender<ArrowResult<RecordBatch>>,
             Receiver<ArrowResult<RecordBatch>>,
-        ) = channel(100);
+        ) = channel(10);
         self.batch_input.lock().unwrap().push(response_rx);
         response_tx
     }
@@ -143,6 +143,8 @@ impl ExecutionPlan for ShuffleStreamReaderExec {
 
     async fn execute(&self, partition: usize) -> Result<SendableRecordBatchStream> {
         info!("ShuffleStreamReaderExec::execute({})", partition);
+        let output_rows=
+            MetricBuilder::new(&self.metrics).output_rows(partition);
         let (sender, receiver): (
             Sender<ArrowResult<RecordBatch>>,
             Receiver<ArrowResult<RecordBatch>>,
@@ -150,9 +152,10 @@ impl ExecutionPlan for ShuffleStreamReaderExec {
 
         let schema = &self.schema;
         let mut rx = self.batch_input.lock().unwrap().pop().unwrap();
-        let join_handle = task::spawn_blocking(move || {
-            while let Some(batch) = rx.blocking_recv() {
-                sender.blocking_send(batch).ok();
+        let join_handle = task::spawn(async move {
+            while let Some(batch) = rx.recv().await {
+                output_rows.add(batch.as_ref().unwrap().num_rows());
+                sender.send(batch).await.ok();
             }
         });
         Ok(RecordBatchReceiverStream::create(

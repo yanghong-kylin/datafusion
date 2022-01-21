@@ -93,8 +93,8 @@ impl Executor {
                 let _stage_id = shuffle_reader.stage_id;
                 {
                     let mut _map = self.channels.write().unwrap();
-                    _map.entry((_job_id, _stage_id, part))
-                        .or_insert(shuffle_reader.create_record_batch_channel());
+                    let sender = shuffle_reader.create_record_batch_channel();
+                    _map.insert((_job_id, _stage_id, part), sender);
                 }
             }
 
