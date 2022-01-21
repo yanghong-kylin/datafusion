@@ -198,17 +198,9 @@ impl FlightService for BallistaFlightService {
                 info!("Trying to read PushPartition job {:?}, stage {:?} and partition {:?}", job_id, stage_id, partition_id);
                 {
                     let channels_map = self._executor.channels.read().unwrap();
-                    let channel_key = (job_id, stage_id);
+                    let channel_key = (job_id, stage_id, partition_id);
                     match channels_map.get(&channel_key) {
-                        Some(d) => {
-                            if d.is_empty() {
-                                return Err(Status::invalid_argument(format!(
-                                    "No receive channels registered for this PushPartition job {:?}, stage {:?} ", &channel_key.0, &channel_key.1)
-                                ));
-                            } else {
-                                (d[(partition_id % d.len())].clone(), channel_key)
-                            }
-                        }
+                        Some(d) => (d.clone(), channel_key),
                         None => {
                             return Err(Status::invalid_argument(format!(
                                 "No receive channels registered for this PushPartition job {:?}, stage {:?} ", &channel_key.0, &channel_key.1)

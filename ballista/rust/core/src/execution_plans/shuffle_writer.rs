@@ -192,18 +192,9 @@ impl ShuffleWriterExec {
         }
     }
 
-    /// Is local push based shuffle
-    pub fn is_local_shuffle(&self, self_id: &str) -> bool {
-        match &self.output_loc {
-            OutputLocation::LocalDir(_) => false,
-            OutputLocation::Executors(execs) => execs.iter().all(|e| e.id.eq(self_id)),
-        }
-    }
-
     pub async fn execute_shuffle_write(
         &self,
         input_partition: usize,
-        local_senders: Option<Vec<Sender<ArrowResult<RecordBatch>>>>,
     ) -> Result<Vec<ShuffleWritePartition>> {
         let now = Instant::now();
 
@@ -238,58 +229,27 @@ impl ShuffleWriterExec {
 
                     OutputLocation::Executors(execs) => {
                         assert_eq!(execs.len(), 1);
-                        match local_senders {
-                            Some(senders) => {
-                                assert_eq!(senders.len(), 1);
-                                info!("Writing results to local sender.");
-                                let mut num_rows = 0;
-                                let mut num_batches = 0;
-                                let mut num_bytes = 0;
-                                while let Some(result) = stream.next().await {
-                                    let batch = result?;
-                                    let batch_size_bytes: usize = batch
-                                        .columns()
-                                        .iter()
-                                        .map(|array| array.get_array_memory_size())
-                                        .sum();
-                                    num_batches += 1;
-                                    num_rows += batch.num_rows();
-                                    num_bytes += batch_size_bytes;
-                                    senders[0].send(Ok(batch)).await.ok();
-                                }
 
-                                let stats = PartitionStats::new(
-                                    Some(num_rows as u64),
-                                    Some(num_batches),
-                                    Some(num_bytes as u64),
-                                );
-                                (stats, String::from(""))
-                            }
-                            None => {
-                                let executor = execs[0].to_owned();
-                                info!(
-                                    "Writing results to host {}, port {}",
-                                    executor.host.as_str(),
-                                    executor.port
-                                );
+                        let executor = execs[0].to_owned();
+                        info!(
+                            "Writing results to host {}, port {}",
+                            executor.host.as_str(),
+                            executor.port
+                        );
 
-                                // stream results to network
-                                let stats = utils::write_stream_to_flight(
-                                    stream,
-                                    executor.host.as_str(),
-                                    executor.port,
-                                    self.job_id.clone(),
-                                    self.stage_id,
-                                    0,
-                                    &write_metrics.write_time,
-                                )
-                                .await
-                                .map_err(|e| {
-                                    DataFusionError::Execution(format!("{:?}", e))
-                                })?;
-                                (stats, String::from(""))
-                            }
-                        }
+                        // stream results to network
+                        let stats = utils::write_stream_to_flight(
+                            stream,
+                            executor.host.as_str(),
+                            executor.port,
+                            self.job_id.clone(),
+                            self.stage_id,
+                            0,
+                            &write_metrics.write_time,
+                        )
+                        .await
+                        .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
+                        (stats, String::from(""))
                     }
                 };
 
@@ -410,37 +370,19 @@ impl ShuffleWriterExec {
                                     }
                                     OutputLocation::Executors(execs) => {
                                         assert_eq!(execs.len(), num_output_partitions);
-                                        match &local_senders {
-                                            Some(senders) => {
-                                                assert_eq!(
-                                                    senders.len(),
-                                                    num_output_partitions
-                                                );
-                                                info!("Writing results to local sender.");
-                                                let sender =
-                                                    (&senders[output_partition]).clone();
-                                                let mut writer =
-                                                    LocalShuffleWriter::new(sender)?;
-                                                writer.write(output_batch).await?;
-                                                writers[output_partition] =
-                                                    Some(ShuffleWriter::Local(writer));
-                                            }
-                                            None => {
-                                                let exec = &execs[output_partition];
-                                                let mut writer =
-                                                    FlightShuffleWriter::new(
-                                                        exec.host.clone(),
-                                                        exec.port,
-                                                        self.job_id.clone(),
-                                                        self.stage_id,
-                                                        output_partition,
-                                                        &stream.schema(),
-                                                    )?;
-                                                writer.write(output_batch).await?;
-                                                writers[output_partition] =
-                                                    Some(ShuffleWriter::Flight(writer));
-                                            }
-                                        }
+
+                                        let exec = &execs[output_partition];
+                                        let mut writer = FlightShuffleWriter::new(
+                                            exec.host.clone(),
+                                            exec.port,
+                                            self.job_id.clone(),
+                                            self.stage_id,
+                                            output_partition,
+                                            &stream.schema(),
+                                        )?;
+                                        writer.write(output_batch).await?;
+                                        writers[output_partition] =
+                                            Some(ShuffleWriter::Flight(writer));
                                     }
                                 }
                             }
@@ -512,7 +454,7 @@ impl ExecutionPlan for ShuffleWriterExec {
         &self,
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        assert!(children.len() == 1);
+        assert_eq!(children.len(), 1);
         Ok(Arc::new(ShuffleWriterExec::try_new(
             self.job_id.clone(),
             self.stage_id,
@@ -526,7 +468,7 @@ impl ExecutionPlan for ShuffleWriterExec {
         &self,
         input_partition: usize,
     ) -> Result<Pin<Box<dyn RecordBatchStream + Send + Sync>>> {
-        let part_loc = self.execute_shuffle_write(input_partition, None).await?;
+        let part_loc = self.execute_shuffle_write(input_partition).await?;
 
         // build metadata result batch
         let num_writers = part_loc.len();
@@ -611,7 +553,6 @@ fn result_schema() -> SchemaRef {
 enum ShuffleWriter {
     File(Box<FileShuffleWriter>),
     Flight(FlightShuffleWriter),
-    Local(LocalShuffleWriter),
 }
 
 impl ShuffleWriter {
@@ -619,7 +560,6 @@ impl ShuffleWriter {
         match self {
             ShuffleWriter::File(writer) => writer.write(batch),
             ShuffleWriter::Flight(writer) => writer.write(batch).await,
-            ShuffleWriter::Local(writer) => writer.write(batch).await,
         }
     }
 
@@ -627,7 +567,6 @@ impl ShuffleWriter {
         match self {
             ShuffleWriter::File(writer) => writer.finish(),
             ShuffleWriter::Flight(writer) => writer.finish(),
-            ShuffleWriter::Local(writer) => writer.finish(),
         }
     }
 
@@ -635,7 +574,6 @@ impl ShuffleWriter {
         match self {
             ShuffleWriter::File(writer) => writer.path(),
             ShuffleWriter::Flight(writer) => writer.path(),
-            ShuffleWriter::Local(writer) => writer.path(),
         }
     }
 
@@ -643,7 +581,6 @@ impl ShuffleWriter {
         match self {
             ShuffleWriter::File(writer) => writer.num_batches(),
             ShuffleWriter::Flight(writer) => writer.num_batches(),
-            ShuffleWriter::Local(writer) => writer.num_batches(),
         }
     }
 
@@ -651,7 +588,6 @@ impl ShuffleWriter {
         match self {
             ShuffleWriter::File(writer) => writer.num_rows(),
             ShuffleWriter::Flight(writer) => writer.num_rows(),
-            ShuffleWriter::Local(writer) => writer.num_rows(),
         }
     }
 
@@ -659,7 +595,6 @@ impl ShuffleWriter {
         match self {
             ShuffleWriter::File(writer) => writer.num_bytes(),
             ShuffleWriter::Flight(writer) => writer.num_bytes(),
-            ShuffleWriter::Local(writer) => writer.num_bytes(),
         }
     }
 }
@@ -760,58 +695,6 @@ impl FlightShuffleWriter {
             stat
         });
 
-        Ok(Self {
-            num_batches: 0,
-            num_rows: 0,
-            num_bytes: 0,
-            sender,
-        })
-    }
-
-    async fn write(&mut self, batch: RecordBatch) -> Result<()> {
-        let num_rows = batch.num_rows();
-        let num_bytes: usize = batch
-            .columns()
-            .iter()
-            .map(|array| array.get_array_memory_size())
-            .sum();
-        self.sender.send(ArrowResult::Ok(batch)).await.ok();
-        self.num_batches += 1;
-        self.num_rows += num_rows as u64;
-        self.num_bytes += num_bytes as u64;
-        Ok(())
-    }
-
-    fn finish(&mut self) -> Result<()> {
-        Ok(())
-    }
-
-    fn path(&self) -> &str {
-        ""
-    }
-
-    fn num_batches(&self) -> u64 {
-        self.num_batches
-    }
-
-    fn num_rows(&self) -> u64 {
-        self.num_rows
-    }
-
-    fn num_bytes(&self) -> u64 {
-        self.num_bytes
-    }
-}
-
-struct LocalShuffleWriter {
-    num_batches: u64,
-    num_rows: u64,
-    num_bytes: u64,
-    sender: Sender<ArrowResult<RecordBatch>>,
-}
-
-impl LocalShuffleWriter {
-    fn new(sender: Sender<ArrowResult<RecordBatch>>) -> Result<Self> {
         Ok(Self {
             num_batches: 0,
             num_rows: 0,

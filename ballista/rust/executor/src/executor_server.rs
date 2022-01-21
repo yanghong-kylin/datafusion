@@ -186,7 +186,6 @@ impl ExecutorServer {
         let execution_result = self
             .executor
             .execute_shuffle_write(
-                self.executor_meta.id.clone(),
                 task_id.job_id.clone(),
                 task_id.stage_id as usize,
                 task_id.partition_id as usize,

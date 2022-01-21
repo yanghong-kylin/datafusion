@@ -33,7 +33,7 @@ use hashbrown::HashMap;
 use tokio::sync::mpsc::Sender;
 
 type ExecutorChannel =
-    RwLock<HashMap<(String, usize), Vec<Sender<ArrowResult<RecordBatch>>>>>;
+    RwLock<HashMap<(String, usize, usize), Sender<ArrowResult<RecordBatch>>>>;
 
 /// Ballista executor
 pub struct Executor {
@@ -41,7 +41,7 @@ pub struct Executor {
     work_dir: String,
 
     /// Channels for sending partial shuffle partitions to stream shuffle reader.
-    /// Key is the jobId + stageId.
+    /// Key is the jobId + stageId + partition.
     pub channels: ExecutorChannel,
 
     /// Specification like total task slots
@@ -75,7 +75,6 @@ impl Executor {
     /// and statistics.
     pub async fn execute_shuffle_write(
         &self,
-        executor_id: String,
         job_id: String,
         stage_id: usize,
         part: usize,
@@ -94,8 +93,8 @@ impl Executor {
                 let _stage_id = shuffle_reader.stage_id;
                 {
                     let mut _map = self.channels.write().unwrap();
-                    let _senders = _map.entry((_job_id, _stage_id)).or_insert(Vec::new());
-                    _senders.push(shuffle_reader.create_record_batch_channel());
+                    _map.entry((_job_id, _stage_id, part))
+                        .or_insert(shuffle_reader.create_record_batch_channel());
                 }
             }
 
@@ -124,18 +123,7 @@ impl Executor {
             ))
         }?;
 
-        let partitions = if exec.is_local_shuffle(executor_id.as_str()) {
-            // If we reach here, the tasks run the stream shuffle reader should already been scheduled
-            // and bound to the executor context.
-            let channel_key = &(job_id.clone(), stage_id);
-            let local_senders = self.get_local_senders(channel_key);
-            let par = exec.execute_shuffle_write(part, local_senders).await?;
-            let mut channels_map = self.channels.write().unwrap();
-            channels_map.remove(channel_key);
-            par
-        } else {
-            exec.execute_shuffle_write(part, None).await?
-        };
+        let partitions = exec.execute_shuffle_write(part).await?;
 
         println!(
             "=== [{}/{}/{}] Physical plan with metrics ===\n{}\n",
@@ -146,14 +134,6 @@ impl Executor {
         );
 
         Ok(partitions)
-    }
-
-    fn get_local_senders(
-        &self,
-        channel_key: &(String, usize),
-    ) -> Option<Vec<Sender<ArrowResult<RecordBatch>>>> {
-        let channels_map = self.channels.read().unwrap();
-        channels_map.get(channel_key).cloned()
     }
 
     pub fn work_dir(&self) -> &str {
